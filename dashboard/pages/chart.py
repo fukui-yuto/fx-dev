@@ -601,14 +601,7 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
         _mc4.markdown("**Stoch%K**  \n―")
 
     # ---- ボラティリティ・エントリー適性チェック ----
-    _pip_sz2 = 0.01 if symbol.endswith("JPY") else 0.0001
-    _min_atr_pips = 3.0   # これ未満はスプレッドに食われる
-    if atr_p < _min_atr_pips and vol_icon != "⚪":
-        st.warning(
-            f"⚠️ ボラ低すぎ ({atr_p:.1f}pips) — スプレッドコスト大。エントリー非推奨",
-            icon="😴",
-        )
-    elif ratio > 1.8:
+    if ratio > 1.8:
         st.warning(
             f"⚡ 急激なボラ拡大 ({ratio:.1f}x) — ストップ注意。ロットを絞ること",
             icon="⚠️",

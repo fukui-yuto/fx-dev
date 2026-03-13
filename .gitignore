@@ -17,8 +17,8 @@ output/
 # ローカルOHLCVデータベース
 data/ohlcv.db
 
-# チャート用動的データ（毎秒生成）
-static/candles.json
+# チャート用動的データ（毎秒生成・git管理不要）
+static/
 
 # Streamlit
 .streamlit/secrets.toml
