@@ -125,7 +125,10 @@
       "Bash(python -c \"import ast,pathlib; ast.parse\\(pathlib.Path\\('dashboard/pages/chart.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('chart.py OK'\\)\" 2>&1)",
       "Bash(python -c \"import ast,pathlib; ast.parse\\(pathlib.Path\\('dashboard/pages/chart.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('chart.py OK'\\)\" 2>&1\npython -c \"import ast,pathlib; ast.parse\\(pathlib.Path\\('app.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('app.py OK'\\)\" 2>&1\npython -c \"import ast,pathlib; ast.parse\\(pathlib.Path\\('dashboard/indicators.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('indicators.py OK'\\)\" 2>&1)",
       "Bash(python -c \"import ast,pathlib; ast.parse\\(pathlib.Path\\('dashboard/pages/chart.py'\\).read_text\\(encoding='utf-8'\\)\\); print\\('OK'\\)\" 2>&1)",
-      "Bash(wc -l /c/Users/yuto/Desktop/GitHub/fx/dashboard/*.py | tail -1)"
+      "Bash(wc -l /c/Users/yuto/Desktop/GitHub/fx/dashboard/*.py | tail -1)",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

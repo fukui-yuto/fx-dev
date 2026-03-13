@@ -14,6 +14,9 @@ __pycache__/
 # 出力データ
 output/
 
+# チャート用静的データ
+static/
+
 # ローカルOHLCVデータベース
 data/ohlcv.db
 
