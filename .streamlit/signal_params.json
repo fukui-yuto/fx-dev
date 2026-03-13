@@ -1,0 +1,54 @@
+{
+  "entry": {
+    "1M": {
+      "adx_min": 20,
+      "score_thresh": 5,
+      "stoch_strong": 8,
+      "stoch_normal": 26,
+      "body_mult": 0.18,
+      "cooldown": 67
+    },
+    "5M": {
+      "adx_min": 22,
+      "score_thresh": 4,
+      "stoch_strong": 8,
+      "stoch_normal": 26,
+      "body_mult": 0.15,
+      "cooldown": 21
+    },
+    "15M": {
+      "adx_min": 27,
+      "score_thresh": 3,
+      "stoch_strong": 6,
+      "stoch_normal": 27,
+      "body_mult": 0.15,
+      "cooldown": 12
+    }
+  },
+  "ai": {
+    "1M": {
+      "forward": 62,
+      "k": 20,
+      "min_prob": 0.8,
+      "cooldown": 56,
+      "adx_min": 26,
+      "atr_mult": 1.4
+    },
+    "5M": {
+      "forward": 19,
+      "k": 22,
+      "min_prob": 0.75,
+      "cooldown": 19,
+      "adx_min": 15,
+      "atr_mult": 0.5
+    },
+    "15M": {
+      "forward": 15,
+      "k": 22,
+      "min_prob": 0.8,
+      "cooldown": 9,
+      "adx_min": 19,
+      "atr_mult": 0.3
+    }
+  }
+}

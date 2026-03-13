@@ -1,0 +1,23 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+streamlit = "*"
+plotly = "*"
+pandas = "*"
+numpy = "*"
+pydantic = "*"
+metatrader5 = "*"
+python-dotenv = "*"
+streamlit-lightweight-charts = "*"
+feedparser = "*"
+anthropic = "*"
+deep-translator = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.12"
+python_full_version = "3.12.8"

@@ -1,0 +1,25 @@
+# 認証情報・秘密情報（絶対にコミットしない）
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# pipenv
+# Pipfile.lock はチームで共有する場合はコミットしてもよい
+# 個人利用であれば除外してもよい
+
+# 出力データ
+output/
+
+# ローカルOHLCVデータベース
+data/ohlcv.db
+
+# チャート用動的データ（毎秒生成）
+static/candles.json
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/chart_settings.json
