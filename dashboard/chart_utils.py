@@ -372,7 +372,7 @@ function setSignalLines(lines) {
 <script>
 const chart = LightweightCharts.createChart(document.getElementById('chart'), {{
   width: window.innerWidth, height: {height},
-  layout: {{ background:{{type:'solid',color:'#0e1117'}}, textColor:'#f0f2f6' }},
+  layout: {{ background:{{type:'solid',color:'#0e1117'}}, textColor:'#f0f2f6', fontSize:11 }},
   grid:   {{ vertLines:{{color:'#1f2937'}}, horzLines:{{color:'#1f2937'}} }},
   crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
   rightPriceScale: {{ borderColor:'#374151' }},

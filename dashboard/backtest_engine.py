@@ -45,6 +45,10 @@ class BacktestParams:
     atr_sl_mult: float = 1.5           # ATR × 倍率 = SL幅
     atr_tp_mult: float = 2.5           # ATR × 倍率 = TP幅
     adx_min: float = 0.0               # ADXフィルター（0=無効、15推奨）
+    hurst_filter: bool = False          # ハーストレジームフィルター（True推奨）
+    max_bars_in_trade: int = 0          # タイムベースエグジット（0=無効）
+    chandelier_mult: float = 0.0        # シャンデリアエグジット ATR倍率（0=無効, 3.0推奨）
+    pullback_atr_mult: float = 0.0      # プルバックエントリーフィルター（0=無効, 1.5推奨）
 
 
 @dataclass
@@ -210,6 +214,28 @@ def _adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     minus_di = 100 * minus_dm.rolling(period).mean() / atr_s.replace(0, np.nan)
     dx       = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
     return dx.ewm(span=period, adjust=False).mean().fillna(0)
+
+
+def _hurst(close: pd.Series, window: int = 100) -> pd.Series:
+    """
+    ローリングハースト指数（R/S分析）。
+    H > 0.55: トレンド相場, H < 0.45: 平均回帰相場, 中間: ランダム
+    """
+    def _rs(arr: np.ndarray) -> float:
+        n = len(arr)
+        if n < 10:
+            return 0.5
+        try:
+            mean  = arr.mean()
+            z     = np.cumsum(arr - mean)
+            r     = z.max() - z.min()
+            s     = arr.std(ddof=1)
+            if s == 0 or r == 0:
+                return 0.5
+            return float(np.log(r / s) / np.log(n))
+        except Exception:
+            return 0.5
+    return close.rolling(window).apply(_rs, raw=True).fillna(0.5)
 
 
 def _stochastic(df: pd.DataFrame, k_period: int) -> pd.Series:
@@ -596,6 +622,29 @@ def generate_signals(df: pd.DataFrame, params: BacktestParams) -> pd.Series:
         adx      = _adx(df)
         sig      = sig.where(adx >= params.adx_min, 0)
 
+    # ハーストレジームフィルター（戦略タイプと市場レジームの整合性確認）
+    if params.hurst_filter:
+        _TREND_STRATS = {
+            "EMAクロス", "ドンチャンブレイクアウト",
+            "トリプル確認(EMA+RSI+MACD)", "夜間スカルパー(4重確認)",
+        }
+        _MR_STRATS = {"RSI×BB", "夜間スカルパー(4重確認)"}
+        hurst = _hurst(close)
+        if params.strategy in _TREND_STRATS - _MR_STRATS:
+            sig = sig.where(hurst >= 0.45, 0)
+        elif params.strategy in _MR_STRATS - _TREND_STRATS:
+            sig = sig.where(hurst <= 0.55, 0)
+
+    # プルバックエントリーフィルター（EMA近傍のみエントリー許可、チェイス防止）
+    if params.pullback_atr_mult > 0:
+        _PULLBACK_STRATS = {"EMAクロス", "トリプル確認(EMA+RSI+MACD)"}
+        if params.strategy in _PULLBACK_STRATS:
+            atr14        = _atr(df, 14)
+            anchor_period = p.get("short_period", p.get("ema_period", 21))
+            ema_anchor   = _ema(close, anchor_period)
+            dist         = (close - ema_anchor).abs()
+            sig          = sig.where(dist <= atr14 * params.pullback_atr_mult, 0)
+
     return sig
 
 
@@ -678,6 +727,7 @@ def execute_trades(df: pd.DataFrame, signals: pd.Series,
     sl_level:    float | None = None
     tp_level:    float | None = None
     hold_bars_count: int      = 0
+    peak_price:  float        = 0.0
 
     n = len(df)
 
@@ -726,6 +776,37 @@ def execute_trades(df: pd.DataFrame, signals: pd.Series,
                 # SL/TPヒット後は同足での再エントリーなし
                 continue
 
+            # タイムベースエグジット（停滞ポジションを強制決済）
+            if params.max_bars_in_trade > 0 and hold_bars_count >= params.max_bars_in_trade:
+                trades.append(_make_trade(
+                    in_trade, entry_price, bar_open,
+                    entry_time, bar_time, "timeout", hold_bars_count,
+                ))
+                in_trade = None
+                continue
+
+            # シャンデリアエグジット（ピーク価格から N×ATR 引いたトレイリングストップ）
+            if params.chandelier_mult > 0 and atr_series is not None:
+                _atr_c = float(atr_series.iloc[i])
+                if in_trade == "long":
+                    peak_price = max(peak_price, bar_high)
+                    if float(bar["close"]) < peak_price - params.chandelier_mult * _atr_c:
+                        trades.append(_make_trade(
+                            in_trade, entry_price, float(bar["close"]),
+                            entry_time, bar_time, "chandelier", hold_bars_count,
+                        ))
+                        in_trade = None
+                        continue
+                else:  # short
+                    peak_price = min(peak_price, bar_low)
+                    if float(bar["close"]) > peak_price + params.chandelier_mult * _atr_c:
+                        trades.append(_make_trade(
+                            in_trade, entry_price, float(bar["close"]),
+                            entry_time, bar_time, "chandelier", hold_bars_count,
+                        ))
+                        in_trade = None
+                        continue
+
             # 逆シグナルでドテン（翌足openで執行 = 当足openで執行済み）
             if (in_trade == "long" and prev_sig == -1) or \
                (in_trade == "short" and prev_sig == 1):
@@ -741,6 +822,7 @@ def execute_trades(df: pd.DataFrame, signals: pd.Series,
                 hold_bars_count = 0
                 atr_val = float(atr_series.iloc[i - 1]) if atr_series is not None else 0.0
                 sl_level, tp_level = _calc_sl_tp_levels(new_dir, entry_price, params, atr_val)
+                peak_price = entry_price  # シャンデリア追跡リセット
 
         else:
             # 新規エントリー
@@ -756,6 +838,7 @@ def execute_trades(df: pd.DataFrame, signals: pd.Series,
                 hold_bars_count = 0
                 atr_val = float(atr_series.iloc[i - 1]) if atr_series is not None else 0.0
                 sl_level, tp_level = _calc_sl_tp_levels(in_trade, entry_price, params, atr_val)
+                peak_price = entry_price  # シャンデリア追跡リセット
 
     # 期末クローズ
     if in_trade is not None and entry_time is not None:

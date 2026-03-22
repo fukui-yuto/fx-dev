@@ -467,10 +467,12 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
         + autotune_markers + entry_markers + econ_events
     )
 
-    # ライブシグナルのSL/TPラインを計算
+    # ライブシグナルのSL/TPライン＆リアルタイムマーカーを計算
     _signal_lines: dict | None = None
+    _live_marker: list[dict] = []
     try:
         from dashboard.signal_engine import get_live_signal
+        from dashboard.chart_utils import JST_OFFSET as _JST2
         _sig = get_live_signal(symbol, timeframe, df)
         if _sig["direction"] != "neutral":
             _signal_lines = {
@@ -481,10 +483,21 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
                 "sl_pips":   _sig["sl_pips"],
                 "tp_pips":   _sig["tp_pips"],
             }
+            # 最新足にリアルタイムエントリーマーカーを追加（歴史マーカーと色/サイズで区別）
+            _is_long  = _sig["direction"] == "long"
+            _last_ts  = int(df.index[-1].timestamp()) + _JST2
+            _live_marker = [{
+                "time":     _last_ts,
+                "position": "belowBar" if _is_long else "aboveBar",
+                "color":    "#00e676" if _is_long else "#ff1744",
+                "shape":    "arrowUp" if _is_long else "arrowDown",
+                "text":     f"{'▲BUY' if _is_long else '▼SELL'} {_sig['entry']}",
+                "size":     2,
+            }]
     except Exception:
         pass
 
-    write_panel_json(df, panel_id, ind, events=events, signal_lines=_signal_lines)
+    write_panel_json(df, panel_id, ind, events=events + _live_marker, signal_lines=_signal_lines)
 
     # データ源ラベル
     src = ("🟢 MT5" if source == "mt5"

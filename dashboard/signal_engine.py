@@ -17,6 +17,9 @@ import pandas as pd
 # auto_tuner からセッションマッピングを共有
 from dashboard.auto_tuner import SESSION_HOURS_JST as _SESSION_HOURS_JST, _ATR_SL_MULT
 
+# meta パラメータキー（strategy_params から除外するキー）
+_META_KEYS = ("rr", "session", "max_bars_in_trade", "chandelier_mult", "pullback_atr_mult")
+
 # 上位TF マッピング（現在足 → 確認に使う上位足）
 _HIGHER_TF: dict[str, str] = {
     "1M":  "15M",
@@ -34,7 +37,7 @@ def _pip_size(symbol: str) -> float:
 
 
 def _get_htf_trend(symbol: str, base_tf: str) -> str:
-    """上位TF の EMA200 方向を返す: 'up' | 'down' | 'neutral'"""
+    """上位TF の EMA200 方向 + RSI50 確認を返す: 'up' | 'down' | 'neutral'"""
     htf = _HIGHER_TF.get(base_tf)
     if not htf:
         return "neutral"
@@ -47,9 +50,14 @@ def _get_htf_trend(symbol: str, base_tf: str) -> str:
         slope  = float(ema200.iloc[-1]) - float(ema200.iloc[-5])
         price  = float(df["close"].iloc[-1])
         ema_v  = float(ema200.iloc[-1])
-        if slope > 0 and price > ema_v:
+        # RSI(14) 50ライン確認（MTF研究: RSI50フィルターで追加勝率向上）
+        delta   = df["close"].diff()
+        gain    = delta.clip(lower=0).rolling(14).mean()
+        loss    = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi14   = float((100 - 100 / (1 + gain / loss.replace(0, np.nan))).iloc[-1])
+        if slope > 0 and price > ema_v and rsi14 > 50:
             return "up"
-        elif slope < 0 and price < ema_v:
+        elif slope < 0 and price < ema_v and rsi14 < 50:
             return "down"
     except Exception:
         pass
@@ -109,10 +117,13 @@ def get_live_signal(
     params   = tune["params"]
 
     # チューニング済みメタパラメータを取得（なければデフォルト）
-    rr          = params.get("rr", rr)
-    session     = params.get("session", "all")
-    trade_hours = _SESSION_HOURS_JST.get(session, None)
-    strategy_params = {k: v for k, v in params.items() if k not in ("rr", "session")}
+    rr                = params.get("rr", rr)
+    session           = params.get("session", "all")
+    max_bars_in_trade = params.get("max_bars_in_trade", 0)
+    chandelier_mult   = params.get("chandelier_mult", 0.0)
+    pullback_atr_mult = params.get("pullback_atr_mult", 0.0)
+    trade_hours       = _SESSION_HOURS_JST.get(session, None)
+    strategy_params   = {k: v for k, v in params.items() if k not in _META_KEYS}
 
     # ---------- シグナル生成 ----------
     try:
@@ -127,6 +138,10 @@ def get_live_signal(
             spread_pips=1.0,
             trade_hours=trade_hours,
             adx_min=15.0,
+            hurst_filter=True,
+            max_bars_in_trade=max_bars_in_trade,
+            chandelier_mult=chandelier_mult,
+            pullback_atr_mult=pullback_atr_mult,
         )
         signals = generate_signals(df, bt_p)
     except Exception:
@@ -146,6 +161,21 @@ def get_live_signal(
     if direction == "neutral":
         return {**neutral, "direction": "neutral", "strategy": strategy,
                 "strategy_params": params, "oos_pf": tune.get("oos_pf", 0.0)}
+
+    # ---- ハーストレジームフィルター（ライブ） ----
+    try:
+        from dashboard.backtest_engine import _hurst as _bt_hurst
+        _TREND_ONLY = {"EMAクロス", "ドンチャンブレイクアウト", "トリプル確認(EMA+RSI+MACD)"}
+        _MR_ONLY    = {"RSI×BB"}
+        _hurst_val  = float(_bt_hurst(df["close"]).iloc[-1])
+        if strategy in _TREND_ONLY and _hurst_val < 0.45:
+            return {**neutral, "direction": "neutral", "strategy": strategy,
+                    "strategy_params": params, "oos_pf": tune.get("oos_pf", 0.0)}
+        if strategy in _MR_ONLY and _hurst_val > 0.55:
+            return {**neutral, "direction": "neutral", "strategy": strategy,
+                    "strategy_params": params, "oos_pf": tune.get("oos_pf", 0.0)}
+    except Exception:
+        pass
 
     # ---------- 上位TF確認 ----------
     htf_trend   = _get_htf_trend(symbol, timeframe)
@@ -194,12 +224,15 @@ def get_live_signal(
 
     dec = 3 if pip >= 0.01 else 5
 
-    # ---------- ATRベース推奨ロット（1%リスク・口座50万円想定） ----------
-    # sl_pips × pip_value × lot = risk_jpy
-    # → lot(万通貨) = risk_jpy / (sl_pips × pip × 10000)
-    _risk_jpy   = 500_000 * 0.01  # 5000円
-    _lot_units  = _risk_jpy / (sl_pips * pip * 10_000) if sl_pips > 0 else 0.0
-    _lot_man    = round(_lot_units, 2)  # 万通貨単位
+    # ---------- ボラティリティターゲティング推奨ロット ----------
+    # 現在ATR / 通常ATR(50本平均) の比でロットをスケール調整
+    # 高ボラ時はリスクを自動削減、低ボラ時は上限1.0に制限
+    _atr50_v   = float(np.mean(tr[-50:])) if len(tr) >= 50 else atr14
+    _vol_ratio  = atr14 / _atr50_v if _atr50_v > 0 else 1.0
+    _vol_scalar = min(1.0, 1.0 / _vol_ratio)   # 高ボラ → ロット削減
+    _risk_jpy   = 500_000 * 0.01                # 基準リスク 5000円（1%）
+    _lot_units  = (_risk_jpy * _vol_scalar) / (sl_pips * pip * 10_000) if sl_pips > 0 else 0.0
+    _lot_man    = round(_lot_units, 2)
 
     return {
         "direction":        direction,
@@ -263,10 +296,13 @@ def get_autotune_markers(
     short_name = strategy[:8]
 
     # チューニング済みメタパラメータを適用
-    rr          = params.get("rr", rr)
-    session     = params.get("session", "all")
-    trade_hours = _SESSION_HOURS_JST.get(session, None)
-    strategy_params = {k: v for k, v in params.items() if k not in ("rr", "session")}
+    rr                = params.get("rr", rr)
+    session           = params.get("session", "all")
+    max_bars_in_trade = params.get("max_bars_in_trade", 0)
+    chandelier_mult   = params.get("chandelier_mult", 0.0)
+    pullback_atr_mult = params.get("pullback_atr_mult", 0.0)
+    trade_hours       = _SESSION_HOURS_JST.get(session, None)
+    strategy_params   = {k: v for k, v in params.items() if k not in _META_KEYS}
 
     try:
         bt_p = BacktestParams(
@@ -283,6 +319,10 @@ def get_autotune_markers(
             atr_sl_mult=_ATR_SL_MULT,
             atr_tp_mult=_ATR_SL_MULT * rr,
             adx_min=15.0,
+            hurst_filter=True,
+            max_bars_in_trade=max_bars_in_trade,
+            chandelier_mult=chandelier_mult,
+            pullback_atr_mult=pullback_atr_mult,
         )
         signals = generate_signals(df, bt_p)
         trades  = execute_trades(df, signals, bt_p)
@@ -295,14 +335,15 @@ def get_autotune_markers(
         entry_ts = int(t.entry_time.timestamp()) + jst_offset
         exit_ts  = int(t.exit_time.timestamp())  + jst_offset
 
-        # ---- エントリーマーカー ----
+        # ---- エントリーマーカー（矢印のみ・テキストなしで視認性向上）----
         if t.direction == "long":
             markers.append({
                 "time":     entry_ts,
                 "position": "belowBar",
                 "color":    "#26a69a",
                 "shape":    "arrowUp",
-                "text":     f"▲BUY [{short_name}]",
+                "text":     "",
+                "size":     1,
             })
         else:
             markers.append({
@@ -310,14 +351,16 @@ def get_autotune_markers(
                 "position": "aboveBar",
                 "color":    "#ef5350",
                 "shape":    "arrowDown",
-                "text":     f"▼SELL [{short_name}]",
+                "text":     "",
+                "size":     1,
             })
 
         # ---- エグジットマーカー（期末クローズは除外）----
         if t.exit_reason == "end":
             continue
 
-        pnl_str = f"{t.pnl_pips:+.1f}p"
+        # pips を整数で表示（小数は不要なノイズ）
+        pnl_str = f"{t.pnl_pips:+.0f}p"
 
         if t.exit_reason == "sl":
             markers.append({
@@ -325,7 +368,8 @@ def get_autotune_markers(
                 "position": "aboveBar" if t.direction == "long" else "belowBar",
                 "color":    "#ef5350",
                 "shape":    "square",
-                "text":     f"✕SL {pnl_str}",
+                "text":     pnl_str,
+                "size":     1,
             })
         elif t.exit_reason == "tp":
             markers.append({
@@ -333,7 +377,17 @@ def get_autotune_markers(
                 "position": "aboveBar" if t.direction == "long" else "belowBar",
                 "color":    "#26a69a",
                 "shape":    "circle",
-                "text":     f"◎TP {pnl_str}",
+                "text":     pnl_str,
+                "size":     1,
+            })
+        elif t.exit_reason == "chandelier":
+            markers.append({
+                "time":     exit_ts,
+                "position": "aboveBar" if t.direction == "long" else "belowBar",
+                "color":    "#26a69a",
+                "shape":    "circle",
+                "text":     pnl_str,
+                "size":     1,
             })
         else:  # signal（逆シグナルによる決済）
             markers.append({
@@ -341,7 +395,8 @@ def get_autotune_markers(
                 "position": "aboveBar" if t.direction == "long" else "belowBar",
                 "color":    "#ffeb3b",
                 "shape":    "circle",
-                "text":     f"→EXIT {pnl_str}",
+                "text":     pnl_str,
+                "size":     1,
             })
 
     markers.sort(key=lambda x: x["time"])
@@ -383,10 +438,13 @@ def get_autotune_summary(
     strategy = tune["strategy"]
     params   = tune["params"]
 
-    rr          = params.get("rr", rr)
-    session     = params.get("session", "all")
-    trade_hours = _SESSION_HOURS_JST.get(session, None)
-    strategy_params = {k: v for k, v in params.items() if k not in ("rr", "session")}
+    rr                = params.get("rr", rr)
+    session           = params.get("session", "all")
+    max_bars_in_trade = params.get("max_bars_in_trade", 0)
+    chandelier_mult   = params.get("chandelier_mult", 0.0)
+    pullback_atr_mult = params.get("pullback_atr_mult", 0.0)
+    trade_hours       = _SESSION_HOURS_JST.get(session, None)
+    strategy_params   = {k: v for k, v in params.items() if k not in _META_KEYS}
 
     try:
         bt_p = BacktestParams(
@@ -403,6 +461,10 @@ def get_autotune_summary(
             atr_sl_mult=_ATR_SL_MULT,
             atr_tp_mult=_ATR_SL_MULT * rr,
             adx_min=15.0,
+            hurst_filter=True,
+            max_bars_in_trade=max_bars_in_trade,
+            chandelier_mult=chandelier_mult,
+            pullback_atr_mult=pullback_atr_mult,
         )
         signals = generate_signals(df, bt_p)
         trades  = execute_trades(df, signals, bt_p)

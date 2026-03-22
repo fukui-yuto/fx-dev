@@ -44,36 +44,43 @@ SESSION_HOURS_JST: dict[str, list[int] | None] = {
 # ============================================================
 AUTO_PARAM_GRIDS: dict[str, dict[str, list]] = {
     "EMAクロス": {
-        "short_period": [8, 13, 21],
-        "long_period":  [34, 55, 89],
-        "rr":           [2.0, 2.5],
-        "session":      ["all", "overlap"],
+        "short_period":      [8, 13, 21],
+        "long_period":       [34, 55, 89],
+        "rr":                [2.0, 2.5],
+        "session":           ["all", "overlap"],
+        "chandelier_mult":   [0.0, 3.0],
+        "pullback_atr_mult": [0.0, 1.5],
     },
     "ドンチャンブレイクアウト": {
-        "period":  [20, 40, 55],
-        "rr":      [2.0, 2.5],
-        "session": ["all", "overlap"],
+        "period":          [20, 40, 55],
+        "rr":              [2.0, 2.5],
+        "session":         ["all", "overlap"],
+        "chandelier_mult": [0.0, 3.0],
     },
     "トリプル確認(EMA+RSI+MACD)": {
-        "ema_period": [50, 100],
-        "rsi_period": [9, 14],
-        "rr":         [2.0, 2.5],
-        "session":    ["all", "overlap"],
+        "ema_period":        [50, 100],
+        "rsi_period":        [9, 14],
+        "rr":                [2.0, 2.5],
+        "session":           ["all", "overlap"],
+        "chandelier_mult":   [0.0, 3.0],
+        "pullback_atr_mult": [0.0, 1.5],
     },
     "RSI×BB": {
-        "rsi_period": [9, 14],
-        "oversold":   [25, 30],
-        "overbought": [70, 75],
-        "bb_std":     [2.0],
-        "rr":         [1.5, 2.0],   # 平均回帰は低RRで勝率優先
+        "rsi_period":        [9, 14],
+        "oversold":          [25, 30],
+        "overbought":        [70, 75],
+        "bb_std":            [2.0],
+        "rr":                [1.5, 2.0],   # 平均回帰は低RRで勝率優先
+        "max_bars_in_trade": [0, 12, 24],  # タイムベースエグジット（平均回帰に有効）
     },
     "夜間スカルパー(4重確認)": {
-        "fast_ema":       [8, 13],
-        "slow_ema":       [21, 34],
-        "rsi_period":     [7],
-        "k_period":       [5],
-        "atr_multiplier": [0.8, 1.0],
-        "rr":             [1.5, 2.0],
+        "fast_ema":          [8, 13],
+        "slow_ema":          [21, 34],
+        "rsi_period":        [7],
+        "k_period":          [5],
+        "atr_multiplier":    [0.8, 1.0],
+        "rr":                [1.5, 2.0],
+        "max_bars_in_trade": [0, 8, 16],   # スキャルプは短い保有が原則
     },
 }
 
@@ -126,10 +133,14 @@ def _run_bt_on_df(
         return None
 
     # メタパラメータを抽出（戦略固有パラメータとは分離）
-    rr              = params.get("rr", 2.0)
-    session         = params.get("session", "all")
-    trade_hours     = SESSION_HOURS_JST.get(session, None)
-    strategy_params = {k: v for k, v in params.items() if k not in ("rr", "session")}
+    rr                 = params.get("rr", 2.0)
+    session            = params.get("session", "all")
+    max_bars_in_trade  = params.get("max_bars_in_trade", 0)
+    chandelier_mult    = params.get("chandelier_mult", 0.0)
+    pullback_atr_mult  = params.get("pullback_atr_mult", 0.0)
+    trade_hours        = SESSION_HOURS_JST.get(session, None)
+    _ALL_META = ("rr", "session", "max_bars_in_trade", "chandelier_mult", "pullback_atr_mult")
+    strategy_params    = {k: v for k, v in params.items() if k not in _ALL_META}
 
     bt_p = BacktestParams(
         symbol="DUMMY",
@@ -145,7 +156,11 @@ def _run_bt_on_df(
         sl_tp_type="atr",
         atr_sl_mult=_ATR_SL_MULT,
         atr_tp_mult=_ATR_SL_MULT * rr,
-        adx_min=15.0,  # ADXフィルター固定（レンジ相場を排除）
+        adx_min=15.0,
+        hurst_filter=True,
+        max_bars_in_trade=max_bars_in_trade,
+        chandelier_mult=chandelier_mult,
+        pullback_atr_mult=pullback_atr_mult,
     )
 
     try:
