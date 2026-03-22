@@ -1245,10 +1245,6 @@ def calculate(df: pd.DataFrame, selected: list[str], jst_offset: int) -> dict:
                 "color": "#ffeb3b",
                 "data": zz["line"],
             }
-            result["ZigZag_markers"] = {
-                "type": "zigzag_markers",
-                "data": zz["markers"],
-            }
 
         elif ind == "エントリーシグナル":
             result["Entry_markers"] = {

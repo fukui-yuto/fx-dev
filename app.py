@@ -19,12 +19,8 @@ st.set_page_config(
 
 pages = {
     "トレード": [
-        st.Page("dashboard/pages/chart.py", title="チャート", icon="📈"),
-    ],
-    "バックテスト": [
-        st.Page("dashboard/pages/backtest.py",    title="バックテスト",       icon="📊"),
-        st.Page("dashboard/pages/optimize.py",    title="戦略最適化",         icon="🔬"),
-        st.Page("dashboard/pages/walkforward.py", title="ウォークフォワード", icon="🔄"),
+        st.Page("dashboard/pages/chart.py",   title="チャート",     icon="📈"),
+        st.Page("dashboard/pages/backtest.py", title="バックテスト", icon="📊"),
     ],
     "情報": [
         st.Page("dashboard/pages/news.py",        title="ファンダメンタル", icon="📰"),

@@ -34,7 +34,7 @@ class BacktestParams:
     strategy: str            # "SMAクロス" | "EMAクロス" | "RSI" | ...
     strategy_params: dict
     direction: str           # "両方" | "ロングのみ" | "ショートのみ"
-    spread_pips: float = 0.3
+    spread_pips: float = 1.0
     lot_size: int = 10_000             # ミニロット（通貨単位）
     trade_hours: list[int] | None = None  # 取引許可時間帯（JST時）。None=全時間
     # SL/TP 設定
@@ -44,6 +44,7 @@ class BacktestParams:
     atr_sl_period: int = 14            # ATR計算期間
     atr_sl_mult: float = 1.5           # ATR × 倍率 = SL幅
     atr_tp_mult: float = 2.5           # ATR × 倍率 = TP幅
+    adx_min: float = 0.0               # ADXフィルター（0=無効、15推奨）
 
 
 @dataclass
@@ -196,6 +197,19 @@ def _atr(df: pd.DataFrame, period: int) -> pd.Series:
         (df["low"]  - df["close"].shift(1)).abs(),
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
+
+
+def _adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """ADX（平均方向性指数）: トレンド強度 0〜100。25以上が強トレンド。"""
+    up       = df["high"].diff().clip(lower=0)
+    down     = (-df["low"].diff()).clip(lower=0)
+    plus_dm  = pd.Series(np.where(up > down, up, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where(down > up, down, 0.0), index=df.index)
+    atr_s    = _atr(df, period)
+    plus_di  = 100 * plus_dm.rolling(period).mean() / atr_s.replace(0, np.nan)
+    minus_di = 100 * minus_dm.rolling(period).mean() / atr_s.replace(0, np.nan)
+    dx       = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    return dx.ewm(span=period, adjust=False).mean().fillna(0)
 
 
 def _stochastic(df: pd.DataFrame, k_period: int) -> pd.Series:
@@ -576,6 +590,11 @@ def generate_signals(df: pd.DataFrame, params: BacktestParams) -> pd.Series:
         jst_hour  = (df.index.hour + 9) % 24
         time_mask = pd.Series(jst_hour, index=df.index).isin(params.trade_hours)
         sig       = sig.where(time_mask, 0)
+
+    # ADX フィルター（レンジ相場排除: ADX < adx_min の足はエントリー禁止）
+    if params.adx_min > 0:
+        adx      = _adx(df)
+        sig      = sig.where(adx >= params.adx_min, 0)
 
     return sig
 

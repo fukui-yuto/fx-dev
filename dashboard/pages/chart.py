@@ -47,7 +47,7 @@ def _load_signal_params() -> dict:
 _SAVE_KEYS = ["layout"] + [
     f"p{i}_{k}"
     for i in range(4)
-    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind")
+    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers")
 ]
 
 # ============================================================
@@ -170,7 +170,8 @@ with st.sidebar:
         _default(f"p{i}_timeframe",  SUPPORTED_TIMEFRAMES[3])  # 1H
         _default(f"p{i}_n_bars",     200)
         _default(f"p{i}_indicators", [])
-        _default(f"p{i}_show_ind",   True)
+        _default(f"p{i}_show_ind",     True)
+        _default(f"p{i}_show_markers", True)
 
         label = f"パネル {i+1}" if panel_count > 1 else "📈 パネル設定"
         with st.expander(label, expanded=(panel_count == 1)):
@@ -192,10 +193,15 @@ with st.sidebar:
                 "インジケーター", INDICATOR_OPTIONS,
                 default=_saved_ind,
                 key=f"sb_ind_{i}")
-            st.session_state[f"p{i}_show_ind"] = st.toggle(
+            _tog_c1, _tog_c2 = st.columns(2)
+            st.session_state[f"p{i}_show_ind"] = _tog_c1.toggle(
                 "インジ表示",
                 value=st.session_state[f"p{i}_show_ind"],
                 key=f"sb_show_ind_{i}")
+            st.session_state[f"p{i}_show_markers"] = _tog_c2.toggle(
+                "売買マーカー",
+                value=st.session_state[f"p{i}_show_markers"],
+                key=f"sb_show_markers_{i}")
 
     st.divider()
     st.markdown("### 📐 トレードツール")
@@ -289,11 +295,12 @@ component_h = _component_height(panel_count)
 
 panel_cfgs = [
     {
-        "symbol":     st.session_state[f"p{i}_symbol"],
-        "timeframe":  st.session_state[f"p{i}_timeframe"],
-        "n_bars":     st.session_state[f"p{i}_n_bars"],
-        "indicators": st.session_state[f"p{i}_indicators"],
-        "show_ind":   st.session_state[f"p{i}_show_ind"],
+        "symbol":       st.session_state[f"p{i}_symbol"],
+        "timeframe":    st.session_state[f"p{i}_timeframe"],
+        "n_bars":       st.session_state[f"p{i}_n_bars"],
+        "indicators":   st.session_state[f"p{i}_indicators"],
+        "show_ind":     st.session_state[f"p{i}_show_ind"],
+        "show_markers": st.session_state.get(f"p{i}_show_markers", True),
     }
     for i in range(panel_count)
 ]
@@ -317,7 +324,7 @@ def _render_panel_html(panel_id: int, cfg: dict) -> None:
         # マーカー系を ind から抽出して initial_events に含める（即時表示のため）
         # LightweightCharts は時刻昇順ソートを要求するのでソートしてから渡す
         _marker_keys = ("Session_markers", "Divergence_markers", "Pattern_markers",
-                        "ZigZag_markers", "Entry_markers")
+                        "Entry_markers")
         initial_events: list[dict] = []
         for _mk in _marker_keys:
             if _mk in ind:
@@ -383,7 +390,7 @@ else:
 # ============================================================
 
 @st.fragment(run_every="1s")
-def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True) -> None:
+def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True) -> None:
     from datetime import datetime, timezone
     from dashboard.chart_utils import JST_OFFSET
     df, source = get_ohlcv_dataframe(symbol, timeframe, count=n_bars)
@@ -395,12 +402,33 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     eff_ind_fast = [x for x in eff_ind if x != "エントリーシグナル"]
     ind = calculate(df, eff_ind_fast, JST_OFFSET)
 
-    # エントリーシグナル: 最終バーのタイムスタンプが変わった時のみ再計算
+    # ---- auto-tuned エントリー・エグジットマーカー＋集計（新バー形成時のみ再計算）----
+    autotune_markers: list[dict] = []
+    _at_stats: dict = {}
+    _at_bar_key = f"_at_{panel_id}_{str(df.index[-1])}"
+    if _at_bar_key not in st.session_state:
+        for _k in [k for k in st.session_state if k.startswith(f"_at_{panel_id}_")]:
+            del st.session_state[_k]
+        try:
+            from dashboard.signal_engine import get_autotune_markers, get_autotune_summary
+            _markers = get_autotune_markers(symbol, timeframe, df, jst_offset=JST_OFFSET)
+            _stats   = get_autotune_summary(symbol, timeframe, df)
+        except Exception:
+            _markers, _stats = [], {}
+        st.session_state[_at_bar_key] = {"markers": _markers, "stats": _stats}
+    _at_cache = st.session_state[_at_bar_key]
+    if show_markers:
+        autotune_markers = _at_cache.get("markers", [])
+    _at_stats = _at_cache.get("stats", {})
+
+    # ---- 旧エントリーシグナル（ユーザーが明示選択した場合のみ）----
+    # auto-tuned マーカーと重複しないよう、ユーザーが「エントリーシグナル」を
+    # 選択した場合のみ旧スコアリングの矢印も追加表示する
     if has_entry:
         from dashboard.indicators import calc_entry_signals
         from dashboard.chart_utils import JST_OFFSET as _JST
         from config.signal_defaults import get_entry_params
-        _sig_params  = _load_signal_params()
+        _sig_params   = _load_signal_params()
         _entry_params = get_entry_params(timeframe, _sig_params.get("entry"))
         _bar_key = f"_ec_{panel_id}_{str(df.index[-1])}"
         if _bar_key not in st.session_state:
@@ -422,10 +450,6 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     if "Pattern_markers" in ind:
         pattern_markers = ind.pop("Pattern_markers").get("data", [])
 
-    zigzag_markers: list[dict] = []
-    if "ZigZag_markers" in ind:
-        zigzag_markers = ind.pop("ZigZag_markers").get("data", [])
-
     entry_markers: list[dict] = []
     if "Entry_markers" in ind:
         entry_markers = ind.pop("Entry_markers").get("data", [])
@@ -437,8 +461,30 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     except Exception:
         econ_events = []
 
-    events = session_markers + divergence_markers + pattern_markers + zigzag_markers + entry_markers + econ_events
-    write_panel_json(df, panel_id, ind, events=events)
+    # auto-tuned マーカーを常に表示（旧エントリーシグナルは選択時のみ追加）
+    events = (
+        session_markers + divergence_markers + pattern_markers
+        + autotune_markers + entry_markers + econ_events
+    )
+
+    # ライブシグナルのSL/TPラインを計算
+    _signal_lines: dict | None = None
+    try:
+        from dashboard.signal_engine import get_live_signal
+        _sig = get_live_signal(symbol, timeframe, df)
+        if _sig["direction"] != "neutral":
+            _signal_lines = {
+                "direction": _sig["direction"],
+                "entry":     _sig["entry"],
+                "sl":        _sig["sl"],
+                "tp":        _sig["tp"],
+                "sl_pips":   _sig["sl_pips"],
+                "tp_pips":   _sig["tp_pips"],
+            }
+    except Exception:
+        pass
+
+    write_panel_json(df, panel_id, ind, events=events, signal_lines=_signal_lines)
 
     # データ源ラベル
     src = ("🟢 MT5" if source == "mt5"
@@ -600,6 +646,28 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     else:
         _mc4.markdown("**Stoch%K**  \n―")
 
+    # ---- 売買マーカー損益サマリー ----
+    if _at_stats and _at_stats.get("trade_count", 0) > 0:
+        _pips   = _at_stats["total_pips"]
+        _cnt    = _at_stats["trade_count"]
+        _wr     = _at_stats["win_rate"]
+        _pf     = _at_stats["profit_factor"]
+        _pf_str = f"{_pf:.2f}" if _pf != float("inf") else "∞"
+        _pips_color = "#26a69a" if _pips >= 0 else "#ef5350"
+        _pips_sign  = "+" if _pips >= 0 else ""
+        st.markdown(
+            f"<div style='background:#1e222d;border-radius:6px;padding:6px 10px;margin:4px 0;"
+            f"display:flex;gap:16px;align-items:center;font-size:0.82rem'>"
+            f"<span style='color:#9e9e9e'>📊 売買マーカー損益 ({symbol} {timeframe})</span>"
+            f"<span style='color:{_pips_color};font-weight:bold;font-size:1rem'>"
+            f"{_pips_sign}{_pips:.1f} pips</span>"
+            f"<span style='color:#9e9e9e'>{_cnt}回</span>"
+            f"<span style='color:#e0e0e0'>勝率 {_wr:.0f}%</span>"
+            f"<span style='color:#e0e0e0'>PF {_pf_str}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     # ---- ボラティリティ・エントリー適性チェック ----
     if ratio > 1.8:
         st.warning(
@@ -640,8 +708,19 @@ def _mt5_autoconnect() -> None:
 
 _mt5_autoconnect()
 
+# 起動時にチューニングが古い場合は自動実行
+def _maybe_auto_tune(symbol: str, timeframe: str) -> None:
+    from dashboard.auto_tuner import is_cache_fresh
+    if not is_cache_fresh(symbol, timeframe):
+        with st.spinner(f"🔬 {symbol}/{timeframe} を自動最適化中（初回のみ時間がかかります）..."):
+            from dashboard.auto_tuner import run_auto_tune
+            run_auto_tune(symbol, timeframe)
+
+
+_maybe_auto_tune(panel_cfgs[0]["symbol"], panel_cfgs[0]["timeframe"])
+
 for i, cfg in enumerate(panel_cfgs):
-    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True))
+    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True))
 
 # ============================================================
 # MTF 整合性パネル（短期トレード特化）
@@ -1012,16 +1091,116 @@ def _chart_news() -> None:
         )
 
 
+@st.fragment(run_every=5)
+def _live_signal_panel(symbol: str, timeframe: str, n_bars: int) -> None:
+    """ライブシグナル（エントリー価格・SL・TP）を表示する"""
+    from dashboard.signal_engine import get_live_signal
+    from dashboard.auto_tuner import is_cache_fresh, run_auto_tune, get_tune_result
+
+    df, _ = get_ohlcv_dataframe(symbol, timeframe, count=n_bars)
+    sig = get_live_signal(symbol, timeframe, df)
+
+    direction  = sig["direction"]
+    confidence = sig["confidence"]
+    strategy   = sig["strategy"]
+    oos_pf     = sig["oos_pf"]
+    htf_trend  = sig["htf_trend"]
+    htf_aligned = sig["htf_aligned"]
+    signal_age = sig["signal_age"]
+
+    # ----- 自動チューニングステータス -----
+    tune = get_tune_result(symbol, timeframe)
+    if tune:
+        import time as _t
+        from dashboard.auto_tuner import _cache_path
+        p = _cache_path(symbol, timeframe)
+        age_h = (_t.time() - p.stat().st_mtime) / 3600 if p.exists() else 0
+        tune_status = f"✅ 最終チューニング: {age_h:.0f}時間前  |  戦略: {tune['strategy']}  |  OOS PF: {tune['oos_pf']:.2f}"
+    else:
+        tune_status = "⚠️ 未チューニング"
+
+    # ----- 方向ラベル -----
+    if direction == "long":
+        dir_label = "🟢 BUY"
+        dir_color = "#26a69a"
+    elif direction == "short":
+        dir_label = "🔴 SELL"
+        dir_color = "#ef5350"
+    else:
+        dir_label = "⏸ 待機"
+        dir_color = "#9e9e9e"
+
+    conf_icon = {"high": "🔥", "medium": "⚡", "low": "❄️"}[confidence]
+    htf_icon  = "✅" if htf_aligned else "⚠️"
+
+    with st.expander(
+        f"🎯 ライブシグナル — {symbol}/{timeframe}　{dir_label}　{conf_icon}",
+        expanded=True,
+    ):
+        st.caption(tune_status)
+        st.markdown(
+            f"<span style='color:{dir_color};font-size:2em;font-weight:bold'>{dir_label}</span>",
+            unsafe_allow_html=True,
+        )
+
+        if direction != "neutral":
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("エントリー価格", f"{sig['entry']}")
+            c2.metric("SL", f"{sig['sl']}", delta=f"-{sig['sl_pips']:.1f}pips", delta_color="inverse")
+            c3.metric("TP", f"{sig['tp']}", delta=f"+{sig['tp_pips']:.1f}pips")
+            c4.metric("推奨ロット", f"{sig.get('recommended_lot', 0):.2f}万通貨",
+                      help="口座50万円・1%リスク基準。実際の口座に合わせてください。")
+
+            _session_label = {"all": "全時間", "london": "ロンドン", "overlap": "ロンドン-NY重複"}.get(
+                sig.get("session", "all"), sig.get("session", "all"))
+            st.markdown(
+                f"**RR比**: 1:{sig['rr']:.1f}　|　"
+                f"**上位TF**: {htf_icon} {htf_trend}方向　|　"
+                f"**シグナル経過**: {signal_age}本前　|　"
+                f"**セッション**: {_session_label}　|　"
+                f"**戦略**: {strategy}"
+            )
+
+            if confidence == "high":
+                st.success(f"🔥 高信頼度シグナル — OOS PF {oos_pf:.2f}・上位TF一致")
+            elif confidence == "medium":
+                st.info(f"⚡ 中信頼度シグナル — OOS PF {oos_pf:.2f}")
+            else:
+                if not htf_aligned:
+                    st.warning(f"⚠️ 上位TF逆行 ({htf_trend}) — エントリー慎重に")
+                else:
+                    st.warning(f"❄️ 低信頼度 — OOS PF {oos_pf:.2f}")
+        else:
+            st.info("現在シグナルなし — 次のシグナルを待機中")
+
+        # 再チューニングボタン
+        if st.button("🔄 今すぐ再チューニング", key=f"retune_{symbol}_{timeframe}"):
+            with st.spinner("最適化中..."):
+                from dashboard.auto_tuner import run_auto_tune
+                run_auto_tune(symbol, timeframe, df=df)
+            st.rerun()
+
+
 # ============================================================
 # 分析パネル（タブ切り替えで縦スクロール削減）
 # ============================================================
 
-_tab_mtf, _tab_score, _tab_cs, _tab_news = st.tabs([
+_tab_signal, _tab_mtf, _tab_score, _tab_cs, _tab_news = st.tabs([
+    "🎯 ライブシグナル",
     "📊 MTF整合性",
     "🎯 エントリースコア",
     "💱 通貨強弱",
     "📰 ニュース",
 ])
+
+with _tab_signal:
+    if panel_count == 1:
+        _live_signal_panel(panel_cfgs[0]["symbol"], panel_cfgs[0]["timeframe"], panel_cfgs[0]["n_bars"])
+    else:
+        _lsc = st.columns(min(panel_count, 2))
+        for _i in range(panel_count):
+            with _lsc[_i % 2]:
+                _live_signal_panel(panel_cfgs[_i]["symbol"], panel_cfgs[_i]["timeframe"], panel_cfgs[_i]["n_bars"])
 
 with _tab_mtf:
     if panel_count == 1:

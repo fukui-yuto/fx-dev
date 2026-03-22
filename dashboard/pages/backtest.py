@@ -254,7 +254,14 @@ with st.sidebar:
     st.divider()
 
     # 時間帯フィルター
-    from dashboard.optimizer import HOUR_PRESETS
+    HOUR_PRESETS: dict = {
+        "全時間":                         None,
+        "東京時間  (JST  9:00-18:00)":   list(range(9, 18)),
+        "ロンドン時間 (JST 16:00-翌1:00)": list(range(16, 24)) + [0],
+        "NY時間    (JST 21:00-翌6:00)":  list(range(21, 24)) + list(range(0, 6)),
+        "東京+ロンドン重複 (JST 16:00-18:00)": [16, 17],
+        "ロンドン+NY重複  (JST 21:00-翌1:00)": [21, 22, 23, 0],
+    }
     st.markdown("**取引時間帯（JST）**")
     hour_preset = st.selectbox(
         "プリセット", list(HOUR_PRESETS.keys()), key="bt_hour_preset",

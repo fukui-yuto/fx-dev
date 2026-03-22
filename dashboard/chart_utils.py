@@ -81,6 +81,7 @@ def write_panel_json(
     panel_id: int,
     indicators_data: dict,
     events: list | None = None,
+    signal_lines: dict | None = None,
 ) -> None:
     """static/panel_{panel_id}.json に最新足のみ書き込む（ポーリング更新用）。
     全データでなく最新1本のみにすることでファイルサイズを最小化し、
@@ -115,7 +116,7 @@ def write_panel_json(
         [e for e in (events or []) if t_min <= e["time"] <= t_max],
         key=lambda e: e["time"],
     )
-    payload = {"candle": last_candle, "indicators": ind_last, "events": filtered_events}
+    payload = {"candle": last_candle, "indicators": ind_last, "events": filtered_events, "signal_lines": signal_lines or {}}
     path = _STATIC_DIR / f"panel_{panel_id}.json"
     # 固定サイズ＋インプレース上書き:
     #   write_bytes() は O_TRUNC で一瞬 0 バイトにするため Tornado が
@@ -325,6 +326,37 @@ function setPivotLines(levels) {
         pivot_init   = "\nsetPivotLines(init.indicators.Pivot_lines);"
         pivot_update = "\n    if (d.indicators?.Pivot_lines) setPivotLines(d.indicators.Pivot_lines);"
 
+    # ---- シグナルライン JS ----
+    signal_lines_js = """
+let _slLine = null, _tpLine = null, _entryLine = null;
+function setSignalLines(lines) {
+  if (_slLine)    { cSeries.removePriceLine(_slLine);    _slLine = null; }
+  if (_tpLine)    { cSeries.removePriceLine(_tpLine);    _tpLine = null; }
+  if (_entryLine) { cSeries.removePriceLine(_entryLine); _entryLine = null; }
+  if (!lines || !lines.direction || lines.direction === 'neutral') return;
+  const isLong = lines.direction === 'long';
+  if (lines.entry) {
+    _entryLine = cSeries.createPriceLine({
+      price: lines.entry, color: '#ffeb3bcc', lineWidth: 1, lineStyle: 2,
+      axisLabelVisible: true, title: isLong ? '\\u25b2 ENTRY' : '\\u25bc ENTRY',
+    });
+  }
+  if (lines.sl) {
+    _slLine = cSeries.createPriceLine({
+      price: lines.sl, color: '#ef5350cc', lineWidth: 2, lineStyle: 0,
+      axisLabelVisible: true, title: ('SL ' + (lines.sl_pips||0).toFixed(1) + 'p'),
+    });
+  }
+  if (lines.tp) {
+    _tpLine = cSeries.createPriceLine({
+      price: lines.tp, color: '#26a69acc', lineWidth: 2, lineStyle: 0,
+      axisLabelVisible: true, title: ('TP ' + (lines.tp_pips||0).toFixed(1) + 'p'),
+    });
+  }
+}"""
+    signal_lines_init   = "\nif (init.signal_lines) setSignalLines(init.signal_lines);"
+    signal_lines_update = "\n    if (d.signal_lines !== undefined) setSignalLines(d.signal_lines);"
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -384,11 +416,12 @@ chart.priceScale('right').applyOptions({{ scaleMargins:{{ top:{cm[0]}, bottom:{c
 {sr_series}
 {recent_hl_series}
 {pivot_series}
+{signal_lines_js}
 
 const init = {initial};
 cSeries.setData(init.candles);
 if (init.events?.length) cSeries.setMarkers(init.events);
-{overlay_init}{zigzag_init}{rsi_init}{stoch_init}{macd_init}{sr_init}{recent_hl_init}{pivot_init}
+{overlay_init}{zigzag_init}{rsi_init}{stoch_init}{macd_init}{sr_init}{recent_hl_init}{pivot_init}{signal_lines_init}
 
 window.addEventListener('resize', () => {{ chart.applyOptions({{ width:window.innerWidth }}); }});
 
@@ -399,7 +432,7 @@ setInterval(async () => {{
     const d = await r.json();
     if (!d.candle) return;
     cSeries.update(d.candle);
-    if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{sr_update}{recent_hl_update}{pivot_update}
+    if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{sr_update}{recent_hl_update}{pivot_update}{signal_lines_update}
   }} catch(e) {{}}
 }}, 100);
 </script>

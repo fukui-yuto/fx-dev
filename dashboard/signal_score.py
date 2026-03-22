@@ -162,10 +162,10 @@ def calc_entry_score(df: pd.DataFrame) -> dict:
     total_short = sum(short_pts)
     diff = total_long - total_short
 
-    if diff > 5:
+    if diff > 20:
         score     = min(100, 50 + int(diff * 1.5))
         direction = "long"
-    elif diff < -5:
+    elif diff < -20:
         score     = min(100, 50 + int(-diff * 1.5))
         direction = "short"
     else:
