@@ -82,6 +82,7 @@ def write_panel_json(
     indicators_data: dict,
     events: list | None = None,
     signal_lines: dict | None = None,
+    notification: dict | None = None,
 ) -> None:
     """static/panel_{panel_id}.json に最新足のみ書き込む（ポーリング更新用）。
     全データでなく最新1本のみにすることでファイルサイズを最小化し、
@@ -116,7 +117,7 @@ def write_panel_json(
         [e for e in (events or []) if t_min <= e["time"] <= t_max],
         key=lambda e: e["time"],
     )
-    payload = {"candle": last_candle, "indicators": ind_last, "events": filtered_events, "signal_lines": signal_lines or {}}
+    payload = {"candle": last_candle, "indicators": ind_last, "events": filtered_events, "signal_lines": signal_lines or {}, "notification": notification}
     path = _STATIC_DIR / f"panel_{panel_id}.json"
     # 固定サイズ＋インプレース上書き:
     #   write_bytes() は O_TRUNC で一瞬 0 バイトにするため Tornado が
@@ -425,6 +426,37 @@ if (init.events?.length) cSeries.setMarkers(init.events);
 
 window.addEventListener('resize', () => {{ chart.applyOptions({{ width:window.innerWidth }}); }});
 
+// ---- 通知サウンド ----
+let _notifLastTs = 0;
+function playNotifSound(type) {{
+  try {{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    function beep(freq, start, dur, vol) {{
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.05);
+    }}
+    if (type === 'entry_long') {{
+      // 上昇2音: 低→高
+      beep(660, 0.00, 0.12, 0.35);
+      beep(880, 0.14, 0.18, 0.35);
+    }} else if (type === 'entry_short') {{
+      // 下降2音: 高→低
+      beep(880, 0.00, 0.12, 0.35);
+      beep(550, 0.14, 0.18, 0.35);
+    }} else {{
+      // エグジット: 短い単音
+      beep(440, 0.00, 0.20, 0.25);
+    }}
+  }} catch(e) {{}}
+}}
+
 setInterval(async () => {{
   try {{
     const r = await fetch('{data_url}?_='+Date.now());
@@ -433,6 +465,10 @@ setInterval(async () => {{
     if (!d.candle) return;
     cSeries.update(d.candle);
     if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{sr_update}{recent_hl_update}{pivot_update}{signal_lines_update}
+    if (d.notification?.ts && d.notification.ts !== _notifLastTs) {{
+      _notifLastTs = d.notification.ts;
+      playNotifSound(d.notification.type);
+    }}
   }} catch(e) {{}}
 }}, 100);
 </script>

@@ -47,7 +47,7 @@ def _load_signal_params() -> dict:
 _SAVE_KEYS = ["layout"] + [
     f"p{i}_{k}"
     for i in range(4)
-    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers")
+    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers", "notify")
 ]
 
 # ============================================================
@@ -172,6 +172,7 @@ with st.sidebar:
         _default(f"p{i}_indicators", [])
         _default(f"p{i}_show_ind",     True)
         _default(f"p{i}_show_markers", True)
+        _default(f"p{i}_notify",       False)
 
         label = f"パネル {i+1}" if panel_count > 1 else "📈 パネル設定"
         with st.expander(label, expanded=(panel_count == 1)):
@@ -193,7 +194,7 @@ with st.sidebar:
                 "インジケーター", INDICATOR_OPTIONS,
                 default=_saved_ind,
                 key=f"sb_ind_{i}")
-            _tog_c1, _tog_c2 = st.columns(2)
+            _tog_c1, _tog_c2, _tog_c3 = st.columns(3)
             st.session_state[f"p{i}_show_ind"] = _tog_c1.toggle(
                 "インジ表示",
                 value=st.session_state[f"p{i}_show_ind"],
@@ -202,6 +203,11 @@ with st.sidebar:
                 "売買マーカー",
                 value=st.session_state[f"p{i}_show_markers"],
                 key=f"sb_show_markers_{i}")
+            st.session_state[f"p{i}_notify"] = _tog_c3.toggle(
+                "🔔 通知",
+                value=st.session_state[f"p{i}_notify"],
+                key=f"sb_notify_{i}",
+                help="エントリー・エグジットシグナル発生時にトースト通知を表示します")
 
     st.divider()
     st.markdown("### 📐 トレードツール")
@@ -301,6 +307,7 @@ panel_cfgs = [
         "indicators":   st.session_state[f"p{i}_indicators"],
         "show_ind":     st.session_state[f"p{i}_show_ind"],
         "show_markers": st.session_state.get(f"p{i}_show_markers", True),
+        "notify":       st.session_state.get(f"p{i}_notify", False),
     }
     for i in range(panel_count)
 ]
@@ -390,7 +397,7 @@ else:
 # ============================================================
 
 @st.fragment(run_every="1s")
-def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True) -> None:
+def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True, notify: bool = False) -> None:
     from datetime import datetime, timezone
     from dashboard.chart_utils import JST_OFFSET
     df, source = get_ohlcv_dataframe(symbol, timeframe, count=n_bars)
@@ -497,7 +504,39 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     except Exception:
         pass
 
-    write_panel_json(df, panel_id, ind, events=events + _live_marker, signal_lines=_signal_lines)
+    # ---- 通知（エントリー・エグジット）— トースト＋音 ----
+    _notification: dict | None = None
+    if notify:
+        import time as _time
+        _notify_dir_key = f"_notify_prev_dir_{panel_id}"
+        _prev_dir = st.session_state.get(_notify_dir_key, "neutral")
+        try:
+            _cur_dir = _sig["direction"]
+        except NameError:
+            _cur_dir = "neutral"
+
+        if _prev_dir == "neutral" and _cur_dir in ("long", "short"):
+            _arrow = "▲ BUY" if _cur_dir == "long" else "▼ SELL"
+            _ep  = f"{_signal_lines['entry']}"        if _signal_lines else ""
+            _slp = f"{_signal_lines['sl_pips']:.1f}p" if _signal_lines else ""
+            _tpp = f"{_signal_lines['tp_pips']:.1f}p" if _signal_lines else ""
+            st.toast(
+                f"**{symbol} {timeframe}** {_arrow} シグナル\n"
+                f"Entry: {_ep}  SL: {_slp}  TP: {_tpp}",
+                icon="📈" if _cur_dir == "long" else "📉",
+            )
+            _notification = {"type": f"entry_{_cur_dir}", "ts": int(_time.time() * 1000)}
+        elif _prev_dir in ("long", "short") and _cur_dir == "neutral":
+            _dir_label = "BUY" if _prev_dir == "long" else "SELL"
+            st.toast(
+                f"**{symbol} {timeframe}** {_dir_label} シグナル消滅",
+                icon="⏸",
+            )
+            _notification = {"type": "exit", "ts": int(_time.time() * 1000)}
+
+        st.session_state[_notify_dir_key] = _cur_dir
+
+    write_panel_json(df, panel_id, ind, events=events + _live_marker, signal_lines=_signal_lines, notification=_notification)
 
     # データ源ラベル
     src = ("🟢 MT5" if source == "mt5"
@@ -733,7 +772,7 @@ def _maybe_auto_tune(symbol: str, timeframe: str) -> None:
 _maybe_auto_tune(panel_cfgs[0]["symbol"], panel_cfgs[0]["timeframe"])
 
 for i, cfg in enumerate(panel_cfgs):
-    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True))
+    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True), cfg.get("notify", False))
 
 # ============================================================
 # MTF 整合性パネル（短期トレード特化）
