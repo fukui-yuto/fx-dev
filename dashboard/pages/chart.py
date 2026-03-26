@@ -83,8 +83,8 @@ def _save_settings() -> None:
 # ヘルパー
 # ============================================================
 
-def _panel_html_key(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True) -> str:
-    s = f"{panel_id}|{symbol}|{timeframe}|{n_bars}|{'|'.join(sorted(indicators))}|{show_ind}"
+def _panel_html_key(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, cvd_scale: int = 1) -> str:
+    s = f"{panel_id}|{symbol}|{timeframe}|{n_bars}|{'|'.join(sorted(indicators))}|{show_ind}|cvd{cvd_scale}"
     return "ph_" + hashlib.md5(s.encode()).hexdigest()[:12]
 
 
@@ -325,17 +325,31 @@ panel_cfgs = [
 # チャートHTML描画（設定変更時のみ再生成）
 # ============================================================
 
+def _apply_cvd_scale(ind: dict, cvd_scale: int) -> None:
+    """CVD デルタデータにスケール倍率をインプレースで適用する。"""
+    if cvd_scale == 1 or "CVD" not in ind:
+        return
+    ind["CVD"]["data"] = [
+        {**d, "value": round(d["value"] * cvd_scale, 2)}
+        for d in ind["CVD"]["data"]
+    ]
+
+
 def _render_panel_html(panel_id: int, cfg: dict) -> None:
     """HTMLキャッシュを確認して描画する。設定変更時のみ再生成。"""
     from dashboard.chart_utils import JST_OFFSET
-    eff_ind = cfg["indicators"] if cfg.get("show_ind", True) else []
-    html_key = _panel_html_key(
+    eff_ind   = cfg["indicators"] if cfg.get("show_ind", True) else []
+    cvd_scale = int(cfg.get("cvd_scale", 1))
+    html_key  = _panel_html_key(
         panel_id, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"],
-        show_ind=cfg.get("show_ind", True)
+        show_ind=cfg.get("show_ind", True), cvd_scale=cvd_scale,
     )
     if html_key not in st.session_state:
         df, _ = get_ohlcv_dataframe(cfg["symbol"], cfg["timeframe"], count=cfg["n_bars"])
         ind   = calculate(df, eff_ind, JST_OFFSET)
+
+        # CVD スケールを初期データにも適用（ポーリング更新と一致させる）
+        _apply_cvd_scale(ind, cvd_scale)
 
         # マーカー系を ind から抽出して initial_events に含める（即時表示のため）
         # LightweightCharts は時刻昇順ソートを要求するのでソートしてから渡す
@@ -418,12 +432,8 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     eff_ind_fast = [x for x in eff_ind if x != "エントリーシグナル"]
     ind = calculate(df, eff_ind_fast, JST_OFFSET)
 
-    # CVD デルタバーに倍率を適用
-    if cvd_scale != 1 and "CVD" in ind:
-        ind["CVD"]["data"] = [
-            {**d, "value": round(d["value"] * cvd_scale, 2)}
-            for d in ind["CVD"]["data"]
-        ]
+    # CVD デルタバーに倍率を適用（_render_panel_html と同じスケールを使用）
+    _apply_cvd_scale(ind, cvd_scale)
 
     # ---- auto-tuned エントリー・エグジットマーカー＋集計（新バー形成時のみ再計算）----
     autotune_markers: list[dict] = []
