@@ -47,7 +47,7 @@ def _load_signal_params() -> dict:
 _SAVE_KEYS = ["layout"] + [
     f"p{i}_{k}"
     for i in range(4)
-    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers", "notify", "cvd_scale")
+    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers", "notify", "cvd_scale", "show_signal")
 ]
 
 # ============================================================
@@ -174,6 +174,7 @@ with st.sidebar:
         _default(f"p{i}_show_markers", True)
         _default(f"p{i}_notify",       False)
         _default(f"p{i}_cvd_scale",    1)
+        _default(f"p{i}_show_signal",  True)
 
         label = f"パネル {i+1}" if panel_count > 1 else "📈 パネル設定"
         with st.expander(label, expanded=(panel_count == 1)):
@@ -195,7 +196,8 @@ with st.sidebar:
                 "インジケーター", INDICATOR_OPTIONS,
                 default=_saved_ind,
                 key=f"sb_ind_{i}")
-            _tog_c1, _tog_c2, _tog_c3 = st.columns(3)
+            _tog_c1, _tog_c2 = st.columns(2)
+            _tog_c3, _tog_c4 = st.columns(2)
             st.session_state[f"p{i}_show_ind"] = _tog_c1.toggle(
                 "インジ表示",
                 value=st.session_state[f"p{i}_show_ind"],
@@ -204,7 +206,12 @@ with st.sidebar:
                 "売買マーカー",
                 value=st.session_state[f"p{i}_show_markers"],
                 key=f"sb_show_markers_{i}")
-            st.session_state[f"p{i}_notify"] = _tog_c3.toggle(
+            st.session_state[f"p{i}_show_signal"] = _tog_c3.toggle(
+                "📡 ライブシグナル",
+                value=st.session_state[f"p{i}_show_signal"],
+                key=f"sb_show_signal_{i}",
+                help="SL/TPライン＆リアルタイムエントリーマーカーを表示します")
+            st.session_state[f"p{i}_notify"] = _tog_c4.toggle(
                 "🔔 通知",
                 value=st.session_state[f"p{i}_notify"],
                 key=f"sb_notify_{i}",
@@ -412,6 +419,7 @@ panel_cfgs = [
         "show_markers": st.session_state.get(f"p{i}_show_markers", True),
         "notify":       st.session_state.get(f"p{i}_notify", False),
         "cvd_scale":    int(st.session_state.get(f"p{i}_cvd_scale", 1)),
+        "show_signal":  st.session_state.get(f"p{i}_show_signal", True),
     }
     for i in range(panel_count)
 ]
@@ -502,7 +510,7 @@ else:
 # ============================================================
 
 @st.fragment(run_every="1s")
-def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True, notify: bool = False, cvd_scale: int = 1) -> None:
+def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True, notify: bool = False, cvd_scale: int = 1, show_signal: bool = True) -> None:
     from datetime import datetime, timezone
     from dashboard.chart_utils import JST_OFFSET
     df, source = get_ohlcv_dataframe(symbol, timeframe, count=n_bars)
@@ -582,32 +590,33 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     # ライブシグナルのSL/TPライン＆リアルタイムマーカーを計算
     _signal_lines: dict | None = None
     _live_marker: list[dict] = []
-    try:
-        from dashboard.signal_engine import get_live_signal
-        from dashboard.chart_utils import JST_OFFSET as _JST2
-        _sig = get_live_signal(symbol, timeframe, df)
-        if _sig["direction"] != "neutral":
-            _signal_lines = {
-                "direction": _sig["direction"],
-                "entry":     _sig["entry"],
-                "sl":        _sig["sl"],
-                "tp":        _sig["tp"],
-                "sl_pips":   _sig["sl_pips"],
-                "tp_pips":   _sig["tp_pips"],
-            }
-            # 最新足にリアルタイムエントリーマーカーを追加（歴史マーカーと色/サイズで区別）
-            _is_long  = _sig["direction"] == "long"
-            _last_ts  = int(df.index[-1].timestamp()) + _JST2
-            _live_marker = [{
-                "time":     _last_ts,
-                "position": "belowBar" if _is_long else "aboveBar",
-                "color":    "#00e676" if _is_long else "#ff1744",
-                "shape":    "arrowUp" if _is_long else "arrowDown",
-                "text":     f"{'▲BUY' if _is_long else '▼SELL'} {_sig['entry']}",
-                "size":     2,
-            }]
-    except Exception:
-        pass
+    if show_signal:
+        try:
+            from dashboard.signal_engine import get_live_signal
+            from dashboard.chart_utils import JST_OFFSET as _JST2
+            _sig = get_live_signal(symbol, timeframe, df)
+            if _sig["direction"] != "neutral":
+                _signal_lines = {
+                    "direction": _sig["direction"],
+                    "entry":     _sig["entry"],
+                    "sl":        _sig["sl"],
+                    "tp":        _sig["tp"],
+                    "sl_pips":   _sig["sl_pips"],
+                    "tp_pips":   _sig["tp_pips"],
+                }
+                # 最新足にリアルタイムエントリーマーカーを追加（歴史マーカーと色/サイズで区別）
+                _is_long  = _sig["direction"] == "long"
+                _last_ts  = int(df.index[-1].timestamp()) + _JST2
+                _live_marker = [{
+                    "time":     _last_ts,
+                    "position": "belowBar" if _is_long else "aboveBar",
+                    "color":    "#00e676" if _is_long else "#ff1744",
+                    "shape":    "arrowUp" if _is_long else "arrowDown",
+                    "text":     f"{'▲BUY' if _is_long else '▼SELL'} {_sig['entry']}",
+                    "size":     2,
+                }]
+        except Exception:
+            pass
 
     # ---- 通知（エントリー・エグジット）— トースト＋音 ----
     _notification: dict | None = None
@@ -616,7 +625,7 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
         _notify_dir_key = f"_notify_prev_dir_{panel_id}"
         _prev_dir = st.session_state.get(_notify_dir_key, "neutral")
         try:
-            _cur_dir = _sig["direction"]
+            _cur_dir = _sig["direction"] if show_signal else "neutral"
         except NameError:
             _cur_dir = "neutral"
 
@@ -892,7 +901,7 @@ def _maybe_auto_tune(symbol: str, timeframe: str) -> None:
 _maybe_auto_tune(panel_cfgs[0]["symbol"], panel_cfgs[0]["timeframe"])
 
 for i, cfg in enumerate(panel_cfgs):
-    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True), cfg.get("notify", False), cfg.get("cvd_scale", 1))
+    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True), cfg.get("notify", False), cfg.get("cvd_scale", 1), cfg.get("show_signal", True))
 
 # ============================================================
 # MTF 整合性パネル（短期トレード特化）

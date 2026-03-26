@@ -294,9 +294,7 @@ stochK.createPriceLine({{ price:50, color:'#55555588', lineWidth:1, lineStyle:2,
 let cvdScaleFactor = {cvd_scale};
 let cvdRaw = [], cvdMaxAbs = 1;
 const cvdH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
-const cvdL = chart.addLineSeries({{color:'#fff176', lineWidth:1, priceScaleId:'cvd_cum', lastValueVisible:false, priceLineVisible:false}});
 chart.priceScale('cvd').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }} }});
-chart.priceScale('cvd_cum').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }}, visible:false }});
 cvdH.createPriceLine({{ price:0, color:'#888888', lineWidth:1, lineStyle:0, axisLabelVisible:true, title:'0' }});
 function _cvdApplyScale() {{
   const h = cvdMaxAbs / cvdScaleFactor;
@@ -306,7 +304,6 @@ function _cvdApplyScale() {{
         cvd_init = (
             "\ncvdRaw = (init.indicators.CVD_delta || []);"
             "\ncvdH.setData(cvdRaw);"
-            "\ncvdL.setData(init.indicators.CVD_line || []);"
             "\nconst _absVals = cvdRaw.map(function(_d){return Math.abs(_d.value);});"
             "\ncvdMaxAbs = _absVals.length > 0 ? Math.max.apply(null, _absVals) : 1;"
             "\nif (!cvdMaxAbs || cvdMaxAbs === 0) cvdMaxAbs = 1;"
@@ -321,7 +318,6 @@ function _cvdApplyScale() {{
             "\n        if (cvdRaw.length > 0 && cvdRaw[cvdRaw.length-1].time === _d.time) { cvdRaw[cvdRaw.length-1] = _d; } else { cvdRaw.push(_d); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_d.value)); }"
             "\n        cvdH.update(_d);"
             "\n    }"
-            "\n    if (d.indicators?.CVD_line) cvdL.update(d.indicators.CVD_line);"
         )
 
     # ---- 直近高値/安値 JS ----
