@@ -92,6 +92,7 @@ def write_panel_json(
     events: list | None = None,
     signal_lines: dict | None = None,
     notification: dict | None = None,
+    cvd_scale: int | None = None,
 ) -> None:
     """static/panel_{panel_id}.json に最新足のみ書き込む（ポーリング更新用）。
     全データでなく最新1本のみにすることでファイルサイズを最小化し、
@@ -126,7 +127,7 @@ def write_panel_json(
         [e for e in (events or []) if t_min <= e["time"] <= t_max],
         key=lambda e: e["time"],
     )
-    payload = {"candle": last_candle, "indicators": ind_last, "events": filtered_events, "signal_lines": signal_lines or {}, "notification": notification}
+    payload = {"candle": last_candle, "indicators": ind_last, "events": filtered_events, "signal_lines": signal_lines or {}, "notification": notification, "cvd_scale": cvd_scale}
     path = _STATIC_DIR / f"panel_{panel_id}.json"
     # 固定サイズ＋インプレース上書き:
     #   write_bytes() は O_TRUNC で一瞬 0 バイトにするため Tornado が
@@ -161,6 +162,7 @@ def build_panel_html(
     indicators_data: dict,
     height: int = 500,
     initial_events: list | None = None,
+    cvd_scale: int = 1,
 ) -> str:
     """
     LightweightChartsを埋め込んだHTMLを返す。
@@ -180,7 +182,7 @@ def build_panel_html(
     has_stoch     = "Stoch_K"     in indicators_data
     has_recent_hl = "Recent_HL"  in indicators_data
     has_zigzag    = "ZigZag_line" in indicators_data
-    has_cvd       = "CVD"         in indicators_data
+    has_cvd       = "CVD_buy"     in indicators_data
     margins  = _scale_margins(has_rsi, has_macd, has_stoch, has_cvd)
     cm       = margins["candles"]
 
@@ -289,13 +291,47 @@ stochK.createPriceLine({{ price:50, color:'#55555588', lineWidth:1, lineStyle:2,
     if has_cvd:
         cvm = margins.get("cvd", (0.75, 0.0))
         cvd_series = f"""
-const cvdH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
+let cvdScaleFactor = {cvd_scale};
+let cvdBuyRaw = [], cvdSellRaw = [], cvdMaxAbs = 1;
+const cvdBuyH  = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
+const cvdSellH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
 const cvdL = chart.addLineSeries({{color:'#fff176', lineWidth:1, priceScaleId:'cvd_cum', lastValueVisible:false, priceLineVisible:false}});
 chart.priceScale('cvd').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }} }});
 chart.priceScale('cvd_cum').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }}, visible:false }});
-cvdH.createPriceLine({{ price:0, color:'#888888', lineWidth:1, lineStyle:0, axisLabelVisible:true, title:'0' }});"""
-        cvd_init   = "\ncvdH.setData(init.indicators.CVD || []);\ncvdL.setData(init.indicators.CVD_line || []);"
-        cvd_update = "\n    if (d.indicators?.CVD) cvdH.update(d.indicators.CVD);\n    if (d.indicators?.CVD_line) cvdL.update(d.indicators.CVD_line);"
+cvdBuyH.createPriceLine({{ price:0, color:'#888888', lineWidth:1, lineStyle:0, axisLabelVisible:true, title:'0' }});
+function _cvdApplyScale() {{
+  const h = cvdMaxAbs / cvdScaleFactor;
+  const p = function() {{ return {{priceRange: {{minValue: -h, maxValue: h}}}}; }};
+  cvdBuyH.applyOptions({{autoscaleInfoProvider: p}});
+  cvdSellH.applyOptions({{autoscaleInfoProvider: p}});
+}}"""
+        cvd_init = (
+            "\ncvdBuyRaw  = (init.indicators.CVD_buy  || []);"
+            "\ncvdSellRaw = (init.indicators.CVD_sell || []);"
+            "\ncvdBuyH.setData(cvdBuyRaw);"
+            "\ncvdSellH.setData(cvdSellRaw);"
+            "\ncvdL.setData(init.indicators.CVD_line || []);"
+            "\nconst _absVals = cvdBuyRaw.concat(cvdSellRaw).map(function(_d){return Math.abs(_d.value);});"
+            "\ncvdMaxAbs = _absVals.length > 0 ? Math.max.apply(null, _absVals) : 1;"
+            "\nif (!cvdMaxAbs || cvdMaxAbs === 0) cvdMaxAbs = 1;"
+            "\n_cvdApplyScale();"
+        )
+        cvd_update = (
+            "\n    if (d.cvd_scale != null && d.cvd_scale !== cvdScaleFactor) {"
+            "\n        cvdScaleFactor = d.cvd_scale; _cvdApplyScale();"
+            "\n    }"
+            "\n    if (d.indicators?.CVD_buy) {"
+            "\n        const _b = d.indicators.CVD_buy;"
+            "\n        if (cvdBuyRaw.length > 0 && cvdBuyRaw[cvdBuyRaw.length-1].time === _b.time) { cvdBuyRaw[cvdBuyRaw.length-1] = _b; } else { cvdBuyRaw.push(_b); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_b.value)); }"
+            "\n        cvdBuyH.update(_b);"
+            "\n    }"
+            "\n    if (d.indicators?.CVD_sell) {"
+            "\n        const _s = d.indicators.CVD_sell;"
+            "\n        if (cvdSellRaw.length > 0 && cvdSellRaw[cvdSellRaw.length-1].time === _s.time) { cvdSellRaw[cvdSellRaw.length-1] = _s; } else { cvdSellRaw.push(_s); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_s.value)); }"
+            "\n        cvdSellH.update(_s);"
+            "\n    }"
+            "\n    if (d.indicators?.CVD_line) cvdL.update(d.indicators.CVD_line);"
+        )
 
     # ---- 直近高値/安値 JS ----
     recent_hl_series = recent_hl_init = recent_hl_update = ""

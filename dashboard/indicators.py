@@ -1095,25 +1095,27 @@ def calc_confirmation_signal(
     return confirm
 
 
-def calc_cvd(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+def calc_cvd(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
     """
     累積出来高デルタ (CVD: Cumulative Volume Delta)
 
-    ティックデータがない OHLCV から各バーの買い/売り出来高比を推定する。
+    ティックデータがない OHLCV から各バーの買い/売り出来高を推定する。
 
     推定式:
-        delta = volume × (2×close − high − low) / (high − low)
+        buy_vol  = volume × (close − low)  / (high − low)
+        sell_vol = volume × (high − close) / (high − low)
     close が high に近いほど買いが多く、low に近いほど売りが多いと仮定。
-    high == low のバー（ローソクが横一直線）はデルタを 0 とする。
+    high == low のバー（ローソクが横一直線）は buy/sell ともに 0 とする。
 
     Returns:
-        delta    : バーごとのデルタ（+= 買い優勢、−= 売り優勢）
-        cvd_cum  : デルタの累積和（方向性トレンド把握用）
+        buy_vol  : バーごとの推定買い出来高（常に ≥ 0）
+        sell_vol : バーごとの推定売り出来高（常に ≥ 0）
+        cvd_cum  : (buy_vol - sell_vol) の累積和（方向性トレンド把握用）
     """
     hl = (df["high"] - df["low"]).replace(0.0, float("nan"))
-    delta = df["volume"] * (2 * df["close"] - df["high"] - df["low"]) / hl
-    delta = delta.fillna(0.0)
-    return delta, delta.cumsum()
+    buy_vol  = (df["volume"] * (df["close"] - df["low"])  / hl).fillna(0.0)
+    sell_vol = (df["volume"] * (df["high"] - df["close"]) / hl).fillna(0.0)
+    return buy_vol, sell_vol, (buy_vol - sell_vol).cumsum()
 
 
 def to_line_data(series: pd.Series, timestamps, jst_offset: int, decimals: int = 5) -> list[dict]:
@@ -1290,17 +1292,20 @@ def calculate(df: pd.DataFrame, selected: list[str], jst_offset: int) -> dict:
             }
 
         elif ind == "累積出来高デルタ (CVD)":
-            delta, cvd_cum = calc_cvd(df)
-            # バーごとのデルタをヒストグラムで表示（0軸基準、緑=買い優勢・赤=売り優勢）
-            result["CVD"] = {
+            buy_vol, sell_vol, cvd_cum = calc_cvd(df)
+            # 買い出来高（正値・緑）と売り出来高（負値・赤）を別々のヒストグラムで表示
+            result["CVD_buy"] = {
                 "type": "sub_cvd",
                 "data": [
-                    {
-                        "time":  int(t.timestamp()) + jst_offset,
-                        "value": round(float(v), 2),
-                        "color": "#26a69a" if v >= 0 else "#ef5350",
-                    }
-                    for t, v in zip(ts, delta) if not pd.isna(v)
+                    {"time": int(t.timestamp()) + jst_offset, "value": round(float(v), 2), "color": "#26a69a"}
+                    for t, v in zip(ts, buy_vol) if not pd.isna(v)
+                ],
+            }
+            result["CVD_sell"] = {
+                "type": "sub_cvd",
+                "data": [
+                    {"time": int(t.timestamp()) + jst_offset, "value": round(-float(v), 2), "color": "#ef5350"}
+                    for t, v in zip(ts, sell_vol) if not pd.isna(v)
                 ],
             }
             # 累積CVDをラインで重ねて方向性トレンドを表示

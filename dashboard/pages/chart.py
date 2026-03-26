@@ -325,16 +325,6 @@ panel_cfgs = [
 # チャートHTML描画（設定変更時のみ再生成）
 # ============================================================
 
-def _apply_cvd_scale(ind: dict, cvd_scale: int) -> None:
-    """CVD デルタデータにスケール倍率をインプレースで適用する。"""
-    if cvd_scale == 1 or "CVD" not in ind:
-        return
-    ind["CVD"]["data"] = [
-        {**d, "value": round(d["value"] * cvd_scale, 2)}
-        for d in ind["CVD"]["data"]
-    ]
-
-
 def _render_panel_html(panel_id: int, cfg: dict) -> None:
     """HTMLキャッシュを確認して描画する。設定変更時のみ再生成。"""
     from dashboard.chart_utils import JST_OFFSET
@@ -348,9 +338,6 @@ def _render_panel_html(panel_id: int, cfg: dict) -> None:
         df, _ = get_ohlcv_dataframe(cfg["symbol"], cfg["timeframe"], count=cfg["n_bars"])
         ind   = calculate(df, eff_ind, JST_OFFSET)
 
-        # CVD スケールを初期データにも適用（ポーリング更新と一致させる）
-        _apply_cvd_scale(ind, cvd_scale)
-
         # マーカー系を ind から抽出して initial_events に含める（即時表示のため）
         # LightweightCharts は時刻昇順ソートを要求するのでソートしてから渡す
         _marker_keys = ("Session_markers", "Divergence_markers", "Pattern_markers",
@@ -362,10 +349,10 @@ def _render_panel_html(panel_id: int, cfg: dict) -> None:
                 initial_events.extend(_ev)
         initial_events.sort(key=lambda e: e["time"])
 
-        write_panel_json(df, panel_id, ind, events=initial_events)
+        write_panel_json(df, panel_id, ind, events=initial_events, cvd_scale=cvd_scale)
         st.session_state[html_key] = build_panel_html(
             df, port, panel_id, cfg["symbol"], ind, height=chart_h,
-            initial_events=initial_events,
+            initial_events=initial_events, cvd_scale=cvd_scale,
         )
         # 同パネルIDの古いHTMLキャッシュを削除
         to_del = [
@@ -431,9 +418,6 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     has_entry = "エントリーシグナル" in eff_ind
     eff_ind_fast = [x for x in eff_ind if x != "エントリーシグナル"]
     ind = calculate(df, eff_ind_fast, JST_OFFSET)
-
-    # CVD デルタバーに倍率を適用（_render_panel_html と同じスケールを使用）
-    _apply_cvd_scale(ind, cvd_scale)
 
     # ---- auto-tuned エントリー・エグジットマーカー＋集計（新バー形成時のみ再計算）----
     autotune_markers: list[dict] = []
@@ -562,7 +546,7 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
 
         st.session_state[_notify_dir_key] = _cur_dir
 
-    write_panel_json(df, panel_id, ind, events=events + _live_marker, signal_lines=_signal_lines, notification=_notification)
+    write_panel_json(df, panel_id, ind, events=events + _live_marker, signal_lines=_signal_lines, notification=_notification, cvd_scale=cvd_scale)
 
     # データ源ラベル
     src = ("🟢 MT5" if source == "mt5"
