@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,14 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+
+# Optuna (ベイズ最適化 TPE) — インストール済みなら使用、なければグリッドサーチにフォールバック
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    _OPTUNA_AVAILABLE = True
+except ImportError:
+    _OPTUNA_AVAILABLE = False
 
 ROOT_DIR  = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT_DIR / "output"
@@ -32,9 +41,11 @@ CACHE_TTL = 24 * 3600  # 24h
 #   ロンドン-NY重複: UTC 13-17 = JST 22-02
 # ============================================================
 SESSION_HOURS_JST: dict[str, list[int] | None] = {
-    "all":     None,
-    "london":  [17, 18, 19, 20, 21, 22, 23, 0, 1],
-    "overlap": [22, 23, 0, 1],
+    "all":          None,
+    "london":       [17, 18, 19, 20, 21, 22, 23, 0, 1],
+    "overlap":      [22, 23, 0, 1],
+    "london_kill":  [16, 17, 18],   # ロンドンキルゾーン 16:00〜19:00 JST
+    "ny_kill":      [21, 22, 23],   # NYオープンキルゾーン 21:00〜00:00 JST
 }
 
 # ============================================================
@@ -47,21 +58,21 @@ AUTO_PARAM_GRIDS: dict[str, dict[str, list]] = {
         "short_period":      [8, 13, 21],
         "long_period":       [34, 55, 89],
         "rr":                [2.0, 2.5],
-        "session":           ["all", "overlap"],
+        "session":           ["all", "overlap", "london_kill", "ny_kill"],
         "chandelier_mult":   [0.0, 3.0],
         "pullback_atr_mult": [0.0, 1.5],
     },
     "ドンチャンブレイクアウト": {
         "period":          [20, 40, 55],
         "rr":              [2.0, 2.5],
-        "session":         ["all", "overlap"],
+        "session":         ["all", "overlap", "london_kill", "ny_kill"],
         "chandelier_mult": [0.0, 3.0],
     },
     "トリプル確認(EMA+RSI+MACD)": {
         "ema_period":        [50, 100],
         "rsi_period":        [9, 14],
         "rr":                [2.0, 2.5],
-        "session":           ["all", "overlap"],
+        "session":           ["all", "overlap", "london_kill", "ny_kill"],
         "chandelier_mult":   [0.0, 3.0],
         "pullback_atr_mult": [0.0, 1.5],
     },
@@ -82,10 +93,49 @@ AUTO_PARAM_GRIDS: dict[str, dict[str, list]] = {
         "rr":                [1.5, 2.0],
         "max_bars_in_trade": [0, 8, 16],   # スキャルプは短い保有が原則
     },
+    # ---- 新規追加戦略 ----
+    "ロンドンブレイクアウト": {
+        "breakout_buffer": [0, 3],          # アジアレンジ突破バッファ（pips）
+        "rr":              [1.5, 2.0, 2.5],
+        "chandelier_mult": [0.0, 3.0],      # シャンデリアトレイリング
+    },
+    "ICT_FVGスキャルパー": {
+        "swing_period":      [5, 10],       # 流動性プール確認期間
+        "fvg_min_pips":      [1, 2],        # FVG 最小サイズ（pips）
+        "sweep_window":      [3, 5],        # スイープ有効期間（本数）
+        "rr":                [1.5, 2.0],
+        "session":           ["london_kill", "ny_kill"],  # キルゾーン限定
+        "max_bars_in_trade": [0, 12],       # タイムベースエグジット
+    },
 }
 
 # ATR SL 倍率（固定）
 _ATR_SL_MULT = 1.5
+
+# Optuna 最適化: 戦略ごとの試行数
+# 3パラメータ以下: 50試行、4パラメータ以上: 80試行（文献: MDPI 2025）
+_OPTUNA_TRIALS_BASE = 50
+_OPTUNA_TRIALS_LARGE = 80
+
+
+def _dsr_hurdle(n_trades: int, n_trials: int) -> float:
+    """
+    DSR（Deflated Sharpe Ratio）ハードル計算。
+    Bailey & Lopez de Prado (2014) の簡略実装。
+
+    IS Sharpe がこの値を超えないと過剰最適化の可能性が高い。
+    hurdle ≈ sqrt(2 * ln(N) / T)
+
+    Args:
+        n_trades: IS 期間のトレード数
+        n_trials: 探索したパラメータ組み合わせ総数 N
+
+    Returns:
+        超えるべき最低 Sharpe ハードル（per-trade ベース）
+    """
+    if n_trades < 5 or n_trials < 1:
+        return 0.0
+    return math.sqrt(2.0 * math.log(max(n_trials, 1)) / max(n_trades, 1))
 
 
 def _cache_path(symbol: str, timeframe: str) -> Path:
@@ -173,6 +223,98 @@ def _run_bt_on_df(
         return None
 
 
+def _optuna_optimize_strategy(
+    strategy: str,
+    grid: dict,
+    is_df: pd.DataFrame,
+    n_trials: int,
+) -> list[dict]:
+    """
+    Optuna TPE で IS 期間の戦略パラメータを最適化する。
+
+    Returns:
+        結果リスト [{strategy, params, is_pf, is_wr, score, is_sharpe}, ...]
+    """
+    results: list[dict] = []
+
+    def objective(trial: "optuna.Trial") -> float:
+        params = {
+            key: trial.suggest_categorical(key, values)
+            for key, values in grid.items()
+        }
+        m = _run_bt_on_df(is_df, strategy, params)
+        if m is None or m["n_trades"] < 5 or m["total_pnl_pips"] <= 0:
+            return -1.0
+        pf       = min(m["profit_factor"], 10.0) if m["profit_factor"] != float("inf") else 10.0
+        wr       = m["win_rate"] / 100.0
+        dd_ratio = abs(m["max_drawdown_jpy"]) / max(m["total_pnl_jpy"], 1.0)
+        score    = pf * wr / (1.0 + dd_ratio)
+
+        # スタディにカスタム属性として保存（コールバックでなくattr経由）
+        trial.set_user_attr("is_pf",     pf)
+        trial.set_user_attr("is_wr",     m["win_rate"])
+        trial.set_user_attr("is_sharpe", m["sharpe_ratio"])
+        trial.set_user_attr("params",    params)
+        return score
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    for trial in study.trials:
+        if trial.value is None or trial.value < 0:
+            continue
+        results.append({
+            "strategy":   strategy,
+            "params":     trial.user_attrs.get("params", {}),
+            "is_pf":      trial.user_attrs.get("is_pf", 0.0),
+            "is_wr":      trial.user_attrs.get("is_wr", 0.0),
+            "is_sharpe":  trial.user_attrs.get("is_sharpe", 0.0),
+            "score":      trial.value,
+        })
+
+    return results
+
+
+def _grid_optimize_strategy(
+    strategy: str,
+    grid: dict,
+    is_df: pd.DataFrame,
+    progress_cb: Callable[[int, int, str], None] | None,
+    done_ref: list[int],
+    total: int,
+) -> list[dict]:
+    """グリッドサーチ（Optuna 未インストール時フォールバック）。"""
+    results: list[dict] = []
+    keys   = list(grid.keys())
+    values = list(grid.values())
+    for combo in itertools.product(*values):
+        params = dict(zip(keys, combo))
+        done_ref[0] += 1
+        if progress_cb:
+            progress_cb(done_ref[0], total, strategy)
+
+        m = _run_bt_on_df(is_df, strategy, params)
+        if m is None or m["n_trades"] < 5 or m["total_pnl_pips"] <= 0:
+            continue
+
+        pf       = min(m["profit_factor"], 10.0) if m["profit_factor"] != float("inf") else 10.0
+        wr       = m["win_rate"] / 100.0
+        dd_ratio = abs(m["max_drawdown_jpy"]) / max(m["total_pnl_jpy"], 1.0)
+        score    = pf * wr / (1.0 + dd_ratio)
+        results.append({
+            "strategy":  strategy,
+            "params":    params,
+            "is_pf":     pf,
+            "is_wr":     m["win_rate"],
+            "is_sharpe": m.get("sharpe_ratio", 0.0),
+            "score":     score,
+        })
+    return results
+
+
 def run_auto_tune(
     symbol: str,
     timeframe: str,
@@ -182,23 +324,26 @@ def run_auto_tune(
     """
     ローリング3窓 IS/OOS 最適化を実行して最良戦略を返す。
 
-    改善点:
-    - IS = 先頭60%（短縮してOOS窓を3つ確保）
-    - OOS窓1 (13%): 汎化性能の第1確認
-    - OOS窓2 (14%): 汎化性能の第2確認
-    - OOS窓3 (13%): 最直近（最重要・重み40%）
-    - 加重平均OOS PFで最良候補を選択（直近ほど重み大）
-    - ADXフィルター（adx_min=15）固定適用
-    - 戦略別RR・セッションを自動最適化
+    最適化手法:
+    - Optuna インストール済み: TPE ベイズ最適化（50〜80試行/戦略）
+    - Optuna 未インストール: グリッドサーチ（フォールバック）
+
+    追加機能:
+    - DSR ハードル（Bailey & Lopez de Prado 2014）: 過剰最適化パラメータを自動排除
+    - IS Sharpe が DSR ハードルを下回る候補は除外
 
     Returns:
         {
             "strategy":    str,
-            "params":      dict,   # rr / session を含む
-            "oos_pf":      float,  # 加重平均OOS PF
+            "params":      dict,
+            "oos_pf":      float,
             "oos_winrate": float,
             "oos_trades":  int,
             "is_score":    float,
+            "is_sharpe":   float,
+            "dsr_hurdle":  float,
+            "n_trials":    int,
+            "optimizer":   "optuna" | "grid",
             "tuned_at":    str,
         }
     """
@@ -214,60 +359,78 @@ def run_auto_tune(
         return None
 
     # ---------- ローリング3窓 IS/OOS 分割 ----------
-    # IS: 先頭60%  OOS窓1: 60〜73%  OOS窓2: 73〜87%  OOS窓3: 87〜100%
     n        = len(df)
     split_is = int(n * 0.60)
     split_o1 = int(n * 0.73)
     split_o2 = int(n * 0.87)
 
-    is_df    = df.iloc[:split_is].copy()
-    oos_dfs  = [
+    is_df   = df.iloc[:split_is].copy()
+    oos_dfs = [
         df.iloc[split_is:split_o1].copy(),  # OOS窓1（重み25%）
         df.iloc[split_o1:split_o2].copy(),  # OOS窓2（重み35%）
         df.iloc[split_o2:].copy(),          # OOS窓3・最直近（重み40%）
     ]
     OOS_WEIGHTS = [0.25, 0.35, 0.40]
 
-    # ---------- IS グリッドサーチ ----------
-    total = sum(
+    # ---------- IS 最適化 ----------
+    results: list[dict] = []
+    total_grid = sum(
         1
         for grid in AUTO_PARAM_GRIDS.values()
         for _ in itertools.product(*grid.values())
     )
-    done    = 0
-    results = []
+    done_ref = [0]  # グリッドサーチ進捗用（ミュータブルにするためリスト）
+    optimizer_used = "grid"
 
-    for strategy, grid in AUTO_PARAM_GRIDS.items():
-        keys   = list(grid.keys())
-        values = list(grid.values())
-        for combo in itertools.product(*values):
-            params = dict(zip(keys, combo))
-            done  += 1
+    if _OPTUNA_AVAILABLE:
+        optimizer_used = "optuna"
+        strat_count = len(AUTO_PARAM_GRIDS)
+        for idx, (strategy, grid) in enumerate(AUTO_PARAM_GRIDS.items()):
+            n_params = len(grid)
+            n_trials = _OPTUNA_TRIALS_LARGE if n_params >= 4 else _OPTUNA_TRIALS_BASE
             if progress_cb:
-                progress_cb(done, total, strategy)
-
-            m = _run_bt_on_df(is_df, strategy, params)
-            if m is None or m["n_trades"] < 5 or m["total_pnl_pips"] <= 0:
-                continue
-
-            pf       = min(m["profit_factor"], 10.0) if m["profit_factor"] != float("inf") else 10.0
-            wr       = m["win_rate"] / 100.0
-            dd_ratio = abs(m["max_drawdown_jpy"]) / max(m["total_pnl_jpy"], 1.0)
-            score    = pf * wr / (1.0 + dd_ratio)
-            results.append({
-                "strategy": strategy,
-                "params":   params,
-                "is_pf":    pf,
-                "is_wr":    m["win_rate"],
-                "score":    score,
-            })
+                progress_cb(idx + 1, strat_count, strategy)
+            results.extend(
+                _optuna_optimize_strategy(strategy, grid, is_df, n_trials)
+            )
+        # DSR の N = 全戦略の総試行数
+        n_trials_total = sum(
+            _OPTUNA_TRIALS_LARGE if len(g) >= 4 else _OPTUNA_TRIALS_BASE
+            for g in AUTO_PARAM_GRIDS.values()
+        )
+    else:
+        # グリッドサーチフォールバック
+        for strategy, grid in AUTO_PARAM_GRIDS.items():
+            results.extend(
+                _grid_optimize_strategy(
+                    strategy, grid, is_df,
+                    progress_cb, done_ref, total_grid,
+                )
+            )
+        n_trials_total = total_grid
 
     if not results:
         return None
 
-    # IS スコア上位 5 候補を 3窓OOS で検証
-    results.sort(key=lambda x: x["score"], reverse=True)
-    top5 = results[:5]
+    # ---------- DSR ハードルフィルタリング ----------
+    # IS Sharpe が DSR ハードルを超えない候補は過剰最適化の可能性が高いので除外
+    for r in results:
+        is_m = _run_bt_on_df(is_df, r["strategy"], r["params"])
+        if is_m is not None:
+            r["is_n_trades"] = is_m["n_trades"]
+        else:
+            r["is_n_trades"] = 0
+
+    dsr_filtered = [
+        r for r in results
+        if r["is_sharpe"] > _dsr_hurdle(r["is_n_trades"], n_trials_total)
+    ]
+    # DSR フィルター後に候補がなければ全候補を使う（緩和）
+    candidates = dsr_filtered if dsr_filtered else results
+
+    # IS スコア上位 5 候補を OOS 検証
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    top5 = candidates[:5]
 
     best    = None
     best_pf = -1.0
@@ -285,7 +448,6 @@ def run_auto_tune(
             else:
                 pfs.append(None)
 
-        # 有効窓が1つ以上あれば採用
         valid = [(w, p) for w, p in zip(OOS_WEIGHTS, pfs) if p is not None]
         if not valid:
             continue
@@ -294,7 +456,9 @@ def run_auto_tune(
         avg_oos_pf = sum(w * p for w, p in valid) / total_w
 
         if avg_oos_pf > best_pf:
-            best_pf = avg_oos_pf
+            best_pf    = avg_oos_pf
+            is_n       = cand.get("is_n_trades", 0)
+            hurdle     = _dsr_hurdle(is_n, n_trials_total)
             best = {
                 "strategy":    cand["strategy"],
                 "params":      cand["params"],
@@ -302,11 +466,16 @@ def run_auto_tune(
                 "oos_winrate": round(m_last["win_rate"], 1) if m_last else 0.0,
                 "oos_trades":  m_last["n_trades"] if m_last else 0,
                 "is_score":    round(cand["score"], 4),
+                "is_sharpe":   round(cand.get("is_sharpe", 0.0), 3),
+                "dsr_hurdle":  round(hurdle, 3),
+                "n_trials":    n_trials_total,
+                "optimizer":   optimizer_used,
                 "tuned_at":    datetime.now(timezone.utc).isoformat(),
             }
 
     if best is None:
-        # OOS 検証を通った候補なし → IS スコア最高を採用
+        is_n   = top5[0].get("is_n_trades", 0)
+        hurdle = _dsr_hurdle(is_n, n_trials_total)
         best = {
             "strategy":    top5[0]["strategy"],
             "params":      top5[0]["params"],
@@ -314,6 +483,10 @@ def run_auto_tune(
             "oos_winrate": 0.0,
             "oos_trades":  0,
             "is_score":    round(top5[0]["score"], 4),
+            "is_sharpe":   round(top5[0].get("is_sharpe", 0.0), 3),
+            "dsr_hurdle":  round(hurdle, 3),
+            "n_trials":    n_trials_total,
+            "optimizer":   optimizer_used,
             "tuned_at":    datetime.now(timezone.utc).isoformat(),
         }
 

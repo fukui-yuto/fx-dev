@@ -36,6 +36,86 @@ def _pip_size(symbol: str) -> float:
     return 0.01 if symbol.endswith("JPY") else 0.0001
 
 
+# ============================================================
+# 3段階ドローダウン回路遮断器（DD Circuit Breaker）
+# Bailey & Lopez de Prado / Elder 6%月次ルール に基づく
+# ============================================================
+
+def get_drawdown_gate(
+    current_equity: float,
+    peak_equity: float,
+    base_risk_pct: float = 1.0,
+) -> dict:
+    """
+    ピーク比ドローダウンに応じたリスク乗数と取引可否を返す。
+
+    3段階プロトコル（v2研究 Topic B より）:
+      DD < 5%  : リスク通常（乗数 1.0）
+      DD 5〜10%: リスク 25% 削減（乗数 0.75）
+      DD 10〜15%: リスク 50% 削減（乗数 0.50）
+      DD > 15% : 取引停止（乗数 0.0）
+
+    Args:
+        current_equity: 現在の口座残高（円）
+        peak_equity:    ピーク口座残高（円）
+        base_risk_pct:  通常時のリスク率（%）
+
+    Returns:
+        {
+            "risk_multiplier":  float,   # 0.0〜1.0
+            "effective_risk":   float,   # base_risk_pct × multiplier（%）
+            "dd_pct":           float,   # 現在のDD率（%）
+            "gate":             str,     # "open" | "reduced_25" | "reduced_50" | "closed"
+            "message":          str,
+        }
+    """
+    if peak_equity <= 0:
+        return {
+            "risk_multiplier": 1.0,
+            "effective_risk":  base_risk_pct,
+            "dd_pct":          0.0,
+            "gate":            "open",
+            "message":         "通常",
+        }
+
+    dd_pct = max(0.0, (peak_equity - current_equity) / peak_equity * 100.0)
+
+    if dd_pct >= 15.0:
+        return {
+            "risk_multiplier": 0.0,
+            "effective_risk":  0.0,
+            "dd_pct":          round(dd_pct, 2),
+            "gate":            "closed",
+            "message":         f"取引停止: DD {dd_pct:.1f}% > 15%。全ポジションを点検してください。",
+        }
+    elif dd_pct >= 10.0:
+        mult = 0.50
+        return {
+            "risk_multiplier": mult,
+            "effective_risk":  round(base_risk_pct * mult, 3),
+            "dd_pct":          round(dd_pct, 2),
+            "gate":            "reduced_50",
+            "message":         f"リスク50%削減中: DD {dd_pct:.1f}%（閾値10%）",
+        }
+    elif dd_pct >= 5.0:
+        mult = 0.75
+        return {
+            "risk_multiplier": mult,
+            "effective_risk":  round(base_risk_pct * mult, 3),
+            "dd_pct":          round(dd_pct, 2),
+            "gate":            "reduced_25",
+            "message":         f"リスク25%削減中: DD {dd_pct:.1f}%（閾値5%）",
+        }
+    else:
+        return {
+            "risk_multiplier": 1.0,
+            "effective_risk":  base_risk_pct,
+            "dd_pct":          round(dd_pct, 2),
+            "gate":            "open",
+            "message":         "通常",
+        }
+
+
 def _get_htf_trend(symbol: str, base_tf: str) -> str:
     """上位TF の EMA200 方向 + RSI50 確認を返す: 'up' | 'down' | 'neutral'"""
     htf = _HIGHER_TF.get(base_tf)
@@ -165,7 +245,10 @@ def get_live_signal(
     # ---- ハーストレジームフィルター（ライブ） ----
     try:
         from dashboard.backtest_engine import _hurst as _bt_hurst
-        _TREND_ONLY = {"EMAクロス", "ドンチャンブレイクアウト", "トリプル確認(EMA+RSI+MACD)"}
+        _TREND_ONLY = {
+            "EMAクロス", "ドンチャンブレイクアウト", "トリプル確認(EMA+RSI+MACD)",
+            "ロンドンブレイクアウト", "ICT_FVGスキャルパー",
+        }
         _MR_ONLY    = {"RSI×BB"}
         _hurst_val  = float(_bt_hurst(df["close"]).iloc[-1])
         if strategy in _TREND_ONLY and _hurst_val < 0.45:

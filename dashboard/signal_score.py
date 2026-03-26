@@ -11,19 +11,106 @@ import pandas as pd
 
 
 # ============================================================
+# HTF マッピング（上位時間足）
+# ============================================================
+_HIGHER_TF: dict[str, str] = {
+    "M1":  "M15",
+    "M5":  "H1",
+    "M15": "H4",
+    "H1":  "D1",
+    "H4":  "W1",
+    "D1":  "W1",
+    # エイリアス
+    "1M":  "15M",
+    "5M":  "1H",
+    "15M": "4H",
+    "1H":  "D1",
+    "4H":  "W1",
+}
+
+
+def _hurst_latest(close: pd.Series, window: int = 100) -> float:
+    """
+    R/S 分析でハースト指数を推定する（最新 window 本を使用）。
+    H > 0.55 → トレンド相場
+    H < 0.45 → 平均回帰相場
+    """
+    s = close.dropna().iloc[-window:]
+    n = len(s)
+    if n < 20:
+        return 0.5
+    try:
+        log_vals: list[float] = []
+        log_ns:   list[float] = []
+        for sub in [n // 4, n // 3, n // 2, n]:
+            if sub < 8:
+                continue
+            chunk = s.iloc[-sub:].values.astype(float)
+            mean  = chunk.mean()
+            devs  = np.cumsum(chunk - mean)
+            rs    = (devs.max() - devs.min()) / (chunk.std(ddof=0) or 1e-10)
+            log_vals.append(float(np.log(rs)))
+            log_ns.append(float(np.log(sub)))
+        if len(log_ns) < 2:
+            return 0.5
+        h = float(np.polyfit(log_ns, log_vals, 1)[0])
+        return max(0.0, min(1.0, h))
+    except Exception:
+        return 0.5
+
+
+def _get_htf_direction(symbol: str, timeframe: str) -> str:
+    """
+    上位時間足の EMA200 + RSI50 でトレンド方向を判定。
+    Returns: "long" | "short" | "neutral"
+    """
+    htf = _HIGHER_TF.get(timeframe, "")
+    if not htf or not symbol:
+        return "neutral"
+    try:
+        from dashboard.sample_data import get_ohlcv_dataframe
+        df_htf, _ = get_ohlcv_dataframe(symbol, htf, count=250)
+        if len(df_htf) < 200:
+            return "neutral"
+        c = df_htf["close"]
+        ema200 = c.ewm(span=200, adjust=False).mean()
+        slope  = float(ema200.iloc[-1]) - float(ema200.iloc[-5])
+        above  = float(c.iloc[-1]) > float(ema200.iloc[-1])
+        # RSI50
+        d    = c.diff()
+        gain = d.clip(lower=0).rolling(14).mean()
+        loss = (-d.clip(upper=0)).rolling(14).mean()
+        rs   = gain / loss.replace(0, float("nan"))
+        rsi  = float((100 - 100 / (1 + rs)).iloc[-1])
+        votes_long  = sum([slope > 0, above, rsi > 50])
+        votes_short = sum([slope < 0, not above, rsi < 50])
+        if votes_long  >= 2:
+            return "long"
+        if votes_short >= 2:
+            return "short"
+    except Exception:
+        pass
+    return "neutral"
+
+
+# ============================================================
 # エントリースコアリング
 # ============================================================
 
-def calc_entry_score(df: pd.DataFrame) -> dict:
+def calc_entry_score(df: pd.DataFrame, symbol: str = "", timeframe: str = "") -> dict:
     """
     複数インジケーターを組み合わせてエントリースコア(0-100)と方向性を返す。
 
-    スコア内訳（合計100点）:
-        EMA20方向       : 20点
-        RSIゾーン       : 25点
-        MACDヒストグラム : 20点
-        BB位置          : 15点
-        ATRボラ         : 20点
+    スコア内訳:
+        HTF EMA200+RSI50 : 35点  ← 上位時間足トレンドフィルター
+        EMA20方向         : 20点
+        RSI(7)ゾーン      : 25点
+        MACDヒストグラム  : 20点
+        Stoch%K           : 20点
+        ATRボラ           : 15点
+
+    Hurst ゲート: H < 0.45（平均回帰相場）はトレンド系信号を抑制し neutral を返す。
+    閾値: diff > 20 で方向性確定
 
     Returns:
         {
@@ -43,7 +130,25 @@ def calc_entry_score(df: pd.DataFrame) -> dict:
     long_pts: list[int] = []
     short_pts: list[int] = []
 
-    # ---- 1. EMA20 方向性 (重み: 20) ----
+    # ---- 0. Hurst ゲート ----
+    hurst = _hurst_latest(close)
+    if hurst < 0.45:
+        details["Hurst"] = (f"{hurst:.2f} 平均回帰相場", 0, 0)
+        return {"score": 50, "direction": "neutral", "long_score": 50,
+                "short_score": 50, "details": details}
+
+    # ---- 1. HTF EMA200 + RSI50 (重み: 35) ----
+    htf_dir = _get_htf_direction(symbol, timeframe)
+    if htf_dir == "long":
+        l, s = 35, 0;  desc = "↑ 上位足トレンド上昇"
+    elif htf_dir == "short":
+        l, s = 0, 35;  desc = "↓ 上位足トレンド下降"
+    else:
+        l, s = 17, 17; desc = "→ 上位足中立"
+    long_pts.append(l); short_pts.append(s)
+    details["HTF_EMA200"] = (desc, l, s)
+
+    # ---- 2. EMA20 方向性 (重み: 20) ----
     ema20 = close.ewm(span=20, adjust=False).mean()
     # 短期足（1M/5M）では2本差でも十分。長期足は多少広く見る
     _slope_bars = 2 if len(close) >= 200 else min(2, len(close) - 1)
@@ -58,10 +163,10 @@ def calc_entry_score(df: pd.DataFrame) -> dict:
     long_pts.append(l); short_pts.append(s)
     details["EMA20"] = (desc, l, s)
 
-    # ---- 2. RSI (重み: 25) ----
+    # ---- 3. RSI(7) (重み: 25) ----
     delta = close.diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    gain  = delta.clip(lower=0).rolling(7).mean()
+    loss  = (-delta.clip(upper=0)).rolling(7).mean()
     rs    = gain / loss.replace(0, float("nan"))
     rsi   = float((100 - 100 / (1 + rs)).iloc[-1])
     if rsi < 30:
@@ -77,7 +182,7 @@ def calc_entry_score(df: pd.DataFrame) -> dict:
     long_pts.append(l); short_pts.append(s)
     details["RSI"] = (desc, l, s)
 
-    # ---- 3. MACD ヒストグラム (重み: 20) ----
+    # ---- 4. MACD ヒストグラム (重み: 20) ----
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd  = ema12 - ema26
@@ -98,26 +203,6 @@ def calc_entry_score(df: pd.DataFrame) -> dict:
     long_pts.append(l); short_pts.append(s)
     details["MACD"] = (desc, l, s)
 
-    # ---- 4. ボリンジャーバンド位置 (重み: 15) ----
-    bb_mid  = close.rolling(20).mean()
-    bb_std  = close.rolling(20).std()
-    bb_up2  = bb_mid + 2 * bb_std
-    bb_lo2  = bb_mid - 2 * bb_std
-    rng     = float(bb_up2.iloc[-1]) - float(bb_lo2.iloc[-1])
-    bb_pos  = (float(close.iloc[-1]) - float(bb_lo2.iloc[-1])) / rng if rng > 0 else 0.5
-    if bb_pos < 0.2:
-        l, s = 15, 0;  desc = "下バンド付近"
-    elif bb_pos > 0.8:
-        l, s = 0, 15;  desc = "上バンド付近"
-    elif bb_pos < 0.4:
-        l, s = 10, 5;  desc = "下寄り"
-    elif bb_pos > 0.6:
-        l, s = 5, 10;  desc = "上寄り"
-    else:
-        l, s = 7, 7;   desc = "中心付近"
-    long_pts.append(l); short_pts.append(s)
-    details["BB"] = (desc, l, s)
-
     # ---- 5. ATRボラティリティ (重み: 15) ----
     h = df["high"].values; lv = df["low"].values; c = df["close"].values
     tr = np.maximum.reduce([
@@ -137,7 +222,7 @@ def calc_entry_score(df: pd.DataFrame) -> dict:
     long_pts.append(l); short_pts.append(s)
     details["ボラ"] = (desc, l, s)
 
-    # ---- 6. Stochastic %K (重み: 20, スキャルプ逆張り検出) ----
+    # ---- 6. Stochastic %K (重み: 20) ----
     _hi5 = pd.Series(df["high"].values).rolling(5).max()
     _lo5 = pd.Series(df["low"].values).rolling(5).min()
     _rng = (_hi5 - _lo5).replace(0, float("nan"))

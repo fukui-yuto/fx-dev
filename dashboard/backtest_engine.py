@@ -603,6 +603,81 @@ def generate_signals(df: pd.DataFrame, params: BacktestParams) -> pd.Series:
         sig = np.where(pullback_long  & rsi_ok_long  & high_vol,  1,
               np.where(pullback_short & rsi_ok_short & high_vol, -1, 0))
 
+    # ============================================================
+    # ロンドンブレイクアウト（戦略J）
+    # ============================================================
+    elif params.strategy == "ロンドンブレイクアウト":
+        buffer_pips = p.get("breakout_buffer", 0)
+        buffer      = buffer_pips * PIP_VALUE
+
+        # JST 時刻・日付（UTC+9）
+        _jst_off  = pd.Timedelta(hours=9)
+        _jst_idx  = df.index + _jst_off
+        _jst_hour = pd.Series(_jst_idx.hour, index=df.index, dtype=int)
+        _jst_day  = pd.Series(_jst_idx.floor("D"), index=df.index)
+
+        # アジアセッション（09〜14 JST）の当日高値・安値を計算
+        _asia_m = (_jst_hour >= 9) & (_jst_hour < 15)
+        _tmp = pd.DataFrame({"h": df["high"], "l": df["low"], "d": _jst_day})
+        _ag  = _tmp[_asia_m].groupby("d").agg(ah=("h", "max"), al=("l", "min"))
+
+        asia_high_s = _jst_day.map(_ag["ah"])
+        asia_low_s  = _jst_day.map(_ag["al"])
+
+        # ロンドンキルゾーン（16〜19 JST）のみシグナル生成
+        _ldn = pd.Series((_jst_hour >= 16) & (_jst_hour < 20), index=df.index)
+
+        bull = _cross_up(close, asia_high_s + buffer) & _ldn
+        bear = _cross_down(close, asia_low_s  - buffer) & _ldn
+
+        sig = np.where(bull, 1, np.where(bear, -1, 0))
+
+    # ============================================================
+    # ICT FVG スキャルパー（戦略I 簡略版）
+    # ============================================================
+    elif params.strategy == "ICT_FVGスキャルパー":
+        swing_period = p.get("swing_period", 10)
+        fvg_min_pips = p.get("fvg_min_pips",  1)
+        sweep_window = p.get("sweep_window",   5)
+        fvg_min      = fvg_min_pips * PIP_VALUE
+
+        # 直近スイング高値・安値（流動性プール）
+        swing_high = df["high"].rolling(swing_period).max().shift(1)
+        swing_low  = df["low"].rolling(swing_period).min().shift(1)
+
+        # 流動性スイープ検出
+        # SSLスイープ: 安値が直近安値を割り込み、終値で回帰（ウィック）
+        ssl_sweep = (df["low"] < swing_low) & (close > swing_low)
+        # BSLスイープ: 高値が直近高値を超え、終値で回帰
+        bsl_sweep = (df["high"] > swing_high) & (close < swing_high)
+
+        # 直近 sweep_window 本以内にスイープがあったか（1本前まで）
+        ssl_recent = (
+            ssl_sweep.rolling(sweep_window, min_periods=1).max()
+            .shift(1).fillna(0).astype(bool)
+        )
+        bsl_recent = (
+            bsl_sweep.rolling(sweep_window, min_periods=1).max()
+            .shift(1).fillna(0).astype(bool)
+        )
+
+        # フェアバリューギャップ（FVG）検出
+        # 強気FVG: 2本前の高値 < 現在の安値（上昇ギャップ）
+        bull_fvg = (
+            (df["high"].shift(2) < df["low"]) &
+            ((df["low"] - df["high"].shift(2)) >= fvg_min)
+        )
+        # 弱気FVG: 2本前の安値 > 現在の高値（下降ギャップ）
+        bear_fvg = (
+            (df["low"].shift(2) > df["high"]) &
+            ((df["low"].shift(2) - df["high"]) >= fvg_min)
+        )
+
+        # シグナル: SSLスイープ後の強気FVG → ロング
+        #          BSLスイープ後の弱気FVG → ショート
+        sig = np.where(bull_fvg & ssl_recent, 1,
+              np.where(bear_fvg & bsl_recent, -1, 0))
+
     sig = pd.Series(sig, index=df.index, dtype=int)
 
     # 方向フィルター
@@ -627,6 +702,7 @@ def generate_signals(df: pd.DataFrame, params: BacktestParams) -> pd.Series:
         _TREND_STRATS = {
             "EMAクロス", "ドンチャンブレイクアウト",
             "トリプル確認(EMA+RSI+MACD)", "夜間スカルパー(4重確認)",
+            "ロンドンブレイクアウト", "ICT_FVGスキャルパー",
         }
         _MR_STRATS = {"RSI×BB", "夜間スカルパー(4重確認)"}
         hurst = _hurst(close)

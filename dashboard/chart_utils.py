@@ -182,7 +182,7 @@ def build_panel_html(
     has_stoch     = "Stoch_K"     in indicators_data
     has_recent_hl = "Recent_HL"  in indicators_data
     has_zigzag    = "ZigZag_line" in indicators_data
-    has_cvd       = "CVD_buy"     in indicators_data
+    has_cvd       = "CVD_delta"   in indicators_data
     margins  = _scale_margins(has_rsi, has_macd, has_stoch, has_cvd)
     cm       = margins["candles"]
 
@@ -292,26 +292,22 @@ stochK.createPriceLine({{ price:50, color:'#55555588', lineWidth:1, lineStyle:2,
         cvm = margins.get("cvd", (0.75, 0.0))
         cvd_series = f"""
 let cvdScaleFactor = {cvd_scale};
-let cvdBuyRaw = [], cvdSellRaw = [], cvdMaxAbs = 1;
-const cvdBuyH  = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
-const cvdSellH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
+let cvdRaw = [], cvdMaxAbs = 1;
+const cvdH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
 const cvdL = chart.addLineSeries({{color:'#fff176', lineWidth:1, priceScaleId:'cvd_cum', lastValueVisible:false, priceLineVisible:false}});
 chart.priceScale('cvd').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }} }});
 chart.priceScale('cvd_cum').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }}, visible:false }});
-cvdBuyH.createPriceLine({{ price:0, color:'#888888', lineWidth:1, lineStyle:0, axisLabelVisible:true, title:'0' }});
+cvdH.createPriceLine({{ price:0, color:'#888888', lineWidth:1, lineStyle:0, axisLabelVisible:true, title:'0' }});
 function _cvdApplyScale() {{
   const h = cvdMaxAbs / cvdScaleFactor;
   const p = function() {{ return {{priceRange: {{minValue: -h, maxValue: h}}}}; }};
-  cvdBuyH.applyOptions({{autoscaleInfoProvider: p}});
-  cvdSellH.applyOptions({{autoscaleInfoProvider: p}});
+  cvdH.applyOptions({{autoscaleInfoProvider: p}});
 }}"""
         cvd_init = (
-            "\ncvdBuyRaw  = (init.indicators.CVD_buy  || []);"
-            "\ncvdSellRaw = (init.indicators.CVD_sell || []);"
-            "\ncvdBuyH.setData(cvdBuyRaw);"
-            "\ncvdSellH.setData(cvdSellRaw);"
+            "\ncvdRaw = (init.indicators.CVD_delta || []);"
+            "\ncvdH.setData(cvdRaw);"
             "\ncvdL.setData(init.indicators.CVD_line || []);"
-            "\nconst _absVals = cvdBuyRaw.concat(cvdSellRaw).map(function(_d){return Math.abs(_d.value);});"
+            "\nconst _absVals = cvdRaw.map(function(_d){return Math.abs(_d.value);});"
             "\ncvdMaxAbs = _absVals.length > 0 ? Math.max.apply(null, _absVals) : 1;"
             "\nif (!cvdMaxAbs || cvdMaxAbs === 0) cvdMaxAbs = 1;"
             "\n_cvdApplyScale();"
@@ -320,15 +316,10 @@ function _cvdApplyScale() {{
             "\n    if (d.cvd_scale != null && d.cvd_scale !== cvdScaleFactor) {"
             "\n        cvdScaleFactor = d.cvd_scale; _cvdApplyScale();"
             "\n    }"
-            "\n    if (d.indicators?.CVD_buy) {"
-            "\n        const _b = d.indicators.CVD_buy;"
-            "\n        if (cvdBuyRaw.length > 0 && cvdBuyRaw[cvdBuyRaw.length-1].time === _b.time) { cvdBuyRaw[cvdBuyRaw.length-1] = _b; } else { cvdBuyRaw.push(_b); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_b.value)); }"
-            "\n        cvdBuyH.update(_b);"
-            "\n    }"
-            "\n    if (d.indicators?.CVD_sell) {"
-            "\n        const _s = d.indicators.CVD_sell;"
-            "\n        if (cvdSellRaw.length > 0 && cvdSellRaw[cvdSellRaw.length-1].time === _s.time) { cvdSellRaw[cvdSellRaw.length-1] = _s; } else { cvdSellRaw.push(_s); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_s.value)); }"
-            "\n        cvdSellH.update(_s);"
+            "\n    if (d.indicators?.CVD_delta) {"
+            "\n        const _d = d.indicators.CVD_delta;"
+            "\n        if (cvdRaw.length > 0 && cvdRaw[cvdRaw.length-1].time === _d.time) { cvdRaw[cvdRaw.length-1] = _d; } else { cvdRaw.push(_d); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_d.value)); }"
+            "\n        cvdH.update(_d);"
             "\n    }"
             "\n    if (d.indicators?.CVD_line) cvdL.update(d.indicators.CVD_line);"
         )

@@ -278,6 +278,101 @@ with st.sidebar:
 
     st.divider()
 
+    # ---- iPhone プッシュ通知設定 ----
+    with st.expander("🔔 iPhone 通知設定", expanded=False):
+        from dashboard.notification_utils import (
+            load_config, save_config, is_configured, get_telegram_chat_id,
+        )
+        _ncfg = load_config()
+
+        _push_enabled = st.toggle(
+            "プッシュ通知を有効にする",
+            value=_ncfg.get("enabled", False),
+            key="push_enabled",
+        )
+
+        # ---- Telegram（無料・推奨） ----
+        st.markdown("**Telegram Bot（無料・推奨）**")
+        st.caption("① @BotFather に /newbot → Bot Token 取得\n② Bot に話しかける → chat_id を自動取得")
+        _tg_token = st.text_input(
+            "Bot Token",
+            value=_ncfg.get("telegram_bot_token", ""),
+            type="password",
+            key="push_tg_token",
+            placeholder="123456789:ABCdef...",
+        )
+        _tg_chat_id = st.text_input(
+            "Chat ID",
+            value=_ncfg.get("telegram_chat_id", ""),
+            key="push_tg_chat_id",
+            placeholder="自動取得ボタンで入力できます",
+        )
+        if st.button("🔍 Chat ID を自動取得", key="push_tg_fetch",
+                     disabled=not _tg_token, use_container_width=True):
+            _fetched = get_telegram_chat_id(_tg_token)
+            if _fetched:
+                st.session_state["push_tg_chat_id"] = _fetched
+                st.success(f"取得成功: {_fetched}")
+                st.rerun()
+            else:
+                st.error("取得失敗。先に Bot に話しかけてください（/start でOK）")
+
+        st.divider()
+
+        # ---- ntfy.sh（無料・アカウント不要） ----
+        st.markdown("**ntfy.sh（無料・アカウント不要）**")
+        _ntfy_topic = st.text_input(
+            "トピック名",
+            value=_ncfg.get("ntfy_topic", ""),
+            key="push_ntfy_topic",
+            placeholder="例: myfx_yuto_9x4k2",
+            help="iPhone に ntfy アプリを入れて同じ名前を登録してください",
+        )
+
+        st.divider()
+
+        # ---- Pushover（$5） ----
+        with st.expander("Pushover（$5 買い切り）", expanded=False):
+            _po_user = st.text_input(
+                "User Key", value=_ncfg.get("pushover_user_key", ""),
+                type="password", key="push_po_user",
+            )
+            _po_token = st.text_input(
+                "API Token", value=_ncfg.get("pushover_api_token", ""),
+                type="password", key="push_po_token",
+            )
+
+        if st.button("💾 通知設定を保存", use_container_width=True, key="push_save"):
+            save_config({
+                "enabled":              _push_enabled,
+                "telegram_bot_token":   _tg_token,
+                "telegram_chat_id":     st.session_state.get("push_tg_chat_id", _tg_chat_id),
+                "ntfy_topic":           _ntfy_topic,
+                "pushover_user_key":    _po_user if "_po_user" in dir() else "",
+                "pushover_api_token":   _po_token if "_po_token" in dir() else "",
+            })
+            st.success("保存しました")
+
+        if st.button("📨 テスト送信", use_container_width=True, key="push_test",
+                     disabled=not _push_enabled):
+            from dashboard.notification_utils import send_entry_notification
+            import time as _ttest
+            # クールダウンをバイパスするため一時的にキーをずらす
+            ok = send_entry_notification(
+                symbol="TEST", timeframe="1H", direction="long",
+                entry=150.123, sl_pips=15.0, tp_pips=30.0,
+                strategy="テスト送信", confidence="high",
+            )
+            if ok:
+                st.success("送信成功！iPhone を確認してください ✅")
+            else:
+                st.error("送信失敗。設定を保存してから再試行してください")
+
+        if is_configured():
+            st.success("通知設定済み ✅", icon="🔔")
+
+    st.divider()
+
     # MT5 接続ステータス
     from data.mt5_client import is_connected, is_available
     if not is_available():
@@ -341,7 +436,7 @@ def _render_panel_html(panel_id: int, cfg: dict) -> None:
         # マーカー系を ind から抽出して initial_events に含める（即時表示のため）
         # LightweightCharts は時刻昇順ソートを要求するのでソートしてから渡す
         _marker_keys = ("Session_markers", "Divergence_markers", "Pattern_markers",
-                        "Entry_markers")
+                        "Entry_markers", "CVD_divergence_markers")
         initial_events: list[dict] = []
         for _mk in _marker_keys:
             if _mk in ind:
@@ -536,6 +631,21 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
                 icon="📈" if _cur_dir == "long" else "📉",
             )
             _notification = {"type": f"entry_{_cur_dir}", "ts": int(_time.time() * 1000)}
+            # iPhone プッシュ通知
+            try:
+                from dashboard.notification_utils import send_entry_notification
+                send_entry_notification(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    direction=_cur_dir,
+                    entry=float(_signal_lines["entry"]) if _signal_lines else 0.0,
+                    sl_pips=float(_signal_lines["sl_pips"]) if _signal_lines else 0.0,
+                    tp_pips=float(_signal_lines["tp_pips"]) if _signal_lines else 0.0,
+                    strategy=_sig.get("strategy", ""),
+                    confidence=_sig.get("confidence", ""),
+                )
+            except Exception:
+                pass
         elif _prev_dir in ("long", "short") and _cur_dir == "neutral":
             _dir_label = "BUY" if _prev_dir == "long" else "SELL"
             st.toast(
@@ -1000,7 +1110,7 @@ def _entry_score_panel(symbol: str, timeframe: str, n_bars: int) -> None:
 
     try:
         df, _ = get_ohlcv_dataframe(symbol, timeframe, count=n_bars)
-        result = calc_entry_score(df)
+        result = calc_entry_score(df, symbol=symbol, timeframe=timeframe)
     except Exception:
         return
 
