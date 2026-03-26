@@ -49,12 +49,13 @@ def _df_to_candles(df: pd.DataFrame) -> list:
     return candles
 
 
-def _scale_margins(has_rsi: bool, has_macd: bool, has_stoch: bool = False) -> dict:
+def _scale_margins(has_rsi: bool, has_macd: bool, has_stoch: bool = False, has_cvd: bool = False) -> dict:
     """サブインジケーターの有無に応じてscaleMarginsを返す。"""
     subs: list[str] = []
     if has_rsi:   subs.append("rsi")
     if has_stoch: subs.append("stoch")
     if has_macd:  subs.append("macd")
+    if has_cvd:   subs.append("cvd")
 
     n = len(subs)
     if n == 0:
@@ -63,12 +64,20 @@ def _scale_margins(has_rsi: bool, has_macd: bool, has_stoch: bool = False) -> di
         return {"candles": (0.0, 0.30), subs[0]: (0.75, 0.0)}
     elif n == 2:
         return {"candles": (0.0, 0.44), subs[0]: (0.60, 0.22), subs[1]: (0.80, 0.0)}
-    else:
+    elif n == 3:
         return {
             "candles": (0.0, 0.55),
             subs[0]:   (0.60, 0.30),
             subs[1]:   (0.78, 0.12),
             subs[2]:   (0.90, 0.0),
+        }
+    else:  # n == 4
+        return {
+            "candles": (0.0, 0.60),
+            subs[0]:   (0.65, 0.45),
+            subs[1]:   (0.75, 0.32),
+            subs[2]:   (0.85, 0.18),
+            subs[3]:   (0.93, 0.0),
         }
 
 
@@ -171,7 +180,8 @@ def build_panel_html(
     has_stoch     = "Stoch_K"     in indicators_data
     has_recent_hl = "Recent_HL"  in indicators_data
     has_zigzag    = "ZigZag_line" in indicators_data
-    margins  = _scale_margins(has_rsi, has_macd, has_stoch)
+    has_cvd       = "CVD"         in indicators_data
+    margins  = _scale_margins(has_rsi, has_macd, has_stoch, has_cvd)
     cm       = margins["candles"]
 
     # ---- overlay indicator JS ----
@@ -273,6 +283,17 @@ stochK.createPriceLine({{ price:20, color:'#26a69a88', lineWidth:1, lineStyle:2,
 stochK.createPriceLine({{ price:50, color:'#55555588', lineWidth:1, lineStyle:2, axisLabelVisible:false }});"""
         stoch_init   = "\nstochK.setData(init.indicators.Stoch_K || []);\nstochD.setData(init.indicators.Stoch_D || []);"
         stoch_update = "\n    if (d.indicators?.Stoch_K) stochK.update(d.indicators.Stoch_K);\n    if (d.indicators?.Stoch_D) stochD.update(d.indicators.Stoch_D);"
+
+    # ---- CVD JS ----
+    cvd_series = cvd_init = cvd_update = ""
+    if has_cvd:
+        cvm = margins.get("cvd", (0.75, 0.0))
+        cvd_series = f"""
+const cvdH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false}});
+chart.priceScale('cvd').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }} }});
+cvdH.createPriceLine({{ price:0, color:'#55555588', lineWidth:1, lineStyle:2, axisLabelVisible:false }});"""
+        cvd_init   = "\ncvdH.setData(init.indicators.CVD || []);"
+        cvd_update = "\n    if (d.indicators?.CVD) cvdH.update(d.indicators.CVD);"
 
     # ---- 直近高値/安値 JS ----
     recent_hl_series = recent_hl_init = recent_hl_update = ""
@@ -414,6 +435,7 @@ chart.priceScale('right').applyOptions({{ scaleMargins:{{ top:{cm[0]}, bottom:{c
 {rsi_series}
 {stoch_series}
 {macd_series}
+{cvd_series}
 {sr_series}
 {recent_hl_series}
 {pivot_series}
@@ -422,7 +444,7 @@ chart.priceScale('right').applyOptions({{ scaleMargins:{{ top:{cm[0]}, bottom:{c
 const init = {initial};
 cSeries.setData(init.candles);
 if (init.events?.length) cSeries.setMarkers(init.events);
-{overlay_init}{zigzag_init}{rsi_init}{stoch_init}{macd_init}{sr_init}{recent_hl_init}{pivot_init}{signal_lines_init}
+{overlay_init}{zigzag_init}{rsi_init}{stoch_init}{macd_init}{cvd_init}{sr_init}{recent_hl_init}{pivot_init}{signal_lines_init}
 
 window.addEventListener('resize', () => {{ chart.applyOptions({{ width:window.innerWidth }}); }});
 
@@ -464,7 +486,7 @@ setInterval(async () => {{
     const d = await r.json();
     if (!d.candle) return;
     cSeries.update(d.candle);
-    if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{sr_update}{recent_hl_update}{pivot_update}{signal_lines_update}
+    if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{cvd_update}{sr_update}{recent_hl_update}{pivot_update}{signal_lines_update}
     if (d.notification?.ts && d.notification.ts !== _notifLastTs) {{
       _notifLastTs = d.notification.ts;
       playNotifSound(d.notification.type);

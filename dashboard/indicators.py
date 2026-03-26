@@ -17,11 +17,12 @@ INDICATOR_OPTIONS = [
     "ボリンジャーバンド (20)",
     "RSI (14)",
     "MACD (12, 26, 9)",
+    "ストキャスティクス (5,3,3)",
+    "累積出来高デルタ (CVD)",
     "レジサポライン",
     "直近高値/安値",
     "ピボットポイント",
     "セッション区切り",
-    "ストキャスティクス (5,3,3)",
     "ダイバージェンス (RSI)",
     "ローソク足パターン",
     "ZigZag（転換点予測）",
@@ -1094,6 +1095,23 @@ def calc_confirmation_signal(
     return confirm
 
 
+def calc_cvd(df: pd.DataFrame) -> pd.Series:
+    """
+    累積出来高デルタ (CVD: Cumulative Volume Delta)
+
+    ティックデータがない OHLCV から各バーの買い/売り出来高比を推定し、
+    デルタ（買い出来高 − 売り出来高）の累積和を返す。
+
+    推定式:
+        delta = volume × (2×close − high − low) / (high − low)
+    close が high に近いほど買いが多く、low に近いほど売りが多いと仮定。
+    high == low のバー（ローソクが横一直線）はデルタを 0 とする。
+    """
+    hl = (df["high"] - df["low"]).replace(0.0, float("nan"))
+    delta = df["volume"] * (2 * df["close"] - df["high"] - df["low"]) / hl
+    return delta.fillna(0.0).cumsum()
+
+
 def to_line_data(series: pd.Series, timestamps, jst_offset: int, decimals: int = 5) -> list[dict]:
     """Series → [{time, value}, ...] 変換。NaNは除外。"""
     result = []
@@ -1265,6 +1283,20 @@ def calculate(df: pd.DataFrame, selected: list[str], jst_offset: int) -> dict:
                 "lineStyle": 1,   # dashed
                 "lineWidth": 2,
                 "data":      to_line_data(calc_vwap(df), ts, jst_offset),
+            }
+
+        elif ind == "累積出来高デルタ (CVD)":
+            cvd = calc_cvd(df)
+            result["CVD"] = {
+                "type": "sub_cvd",
+                "data": [
+                    {
+                        "time":  int(t.timestamp()) + jst_offset,
+                        "value": round(float(v), 2),
+                        "color": "#26a69a" if v >= 0 else "#ef5350",
+                    }
+                    for t, v in zip(ts, cvd) if not pd.isna(v)
+                ],
             }
 
     return result
