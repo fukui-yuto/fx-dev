@@ -1,2 +1,4 @@
 @echo off
-start "" pipenv run streamlit run app.py
+cd /d %~dp0
+pipenv run streamlit run app.py
+pause
