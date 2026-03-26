@@ -1095,21 +1095,25 @@ def calc_confirmation_signal(
     return confirm
 
 
-def calc_cvd(df: pd.DataFrame) -> pd.Series:
+def calc_cvd(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """
     累積出来高デルタ (CVD: Cumulative Volume Delta)
 
-    ティックデータがない OHLCV から各バーの買い/売り出来高比を推定し、
-    デルタ（買い出来高 − 売り出来高）の累積和を返す。
+    ティックデータがない OHLCV から各バーの買い/売り出来高比を推定する。
 
     推定式:
         delta = volume × (2×close − high − low) / (high − low)
     close が high に近いほど買いが多く、low に近いほど売りが多いと仮定。
     high == low のバー（ローソクが横一直線）はデルタを 0 とする。
+
+    Returns:
+        delta    : バーごとのデルタ（+= 買い優勢、−= 売り優勢）
+        cvd_cum  : デルタの累積和（方向性トレンド把握用）
     """
     hl = (df["high"] - df["low"]).replace(0.0, float("nan"))
     delta = df["volume"] * (2 * df["close"] - df["high"] - df["low"]) / hl
-    return delta.fillna(0.0).cumsum()
+    delta = delta.fillna(0.0)
+    return delta, delta.cumsum()
 
 
 def to_line_data(series: pd.Series, timestamps, jst_offset: int, decimals: int = 5) -> list[dict]:
@@ -1286,7 +1290,8 @@ def calculate(df: pd.DataFrame, selected: list[str], jst_offset: int) -> dict:
             }
 
         elif ind == "累積出来高デルタ (CVD)":
-            cvd = calc_cvd(df)
+            delta, cvd_cum = calc_cvd(df)
+            # バーごとのデルタをヒストグラムで表示（0軸基準、緑=買い優勢・赤=売り優勢）
             result["CVD"] = {
                 "type": "sub_cvd",
                 "data": [
@@ -1295,8 +1300,13 @@ def calculate(df: pd.DataFrame, selected: list[str], jst_offset: int) -> dict:
                         "value": round(float(v), 2),
                         "color": "#26a69a" if v >= 0 else "#ef5350",
                     }
-                    for t, v in zip(ts, cvd) if not pd.isna(v)
+                    for t, v in zip(ts, delta) if not pd.isna(v)
                 ],
+            }
+            # 累積CVDをラインで重ねて方向性トレンドを表示
+            result["CVD_line"] = {
+                "type": "sub_cvd_line",
+                "data": to_line_data(cvd_cum, ts, jst_offset, decimals=2),
             }
 
     return result
