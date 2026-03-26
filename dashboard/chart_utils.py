@@ -290,8 +290,9 @@ stochK.createPriceLine({{ price:50, color:'#55555588', lineWidth:1, lineStyle:2,
         cvm = margins.get("cvd", (0.75, 0.0))
         cvd_series = f"""
 const cvdH = chart.addHistogramSeries({{priceScaleId:'cvd', lastValueVisible:false, base:0}});
-const cvdL = chart.addLineSeries({{color:'#fff176', lineWidth:1, priceScaleId:'cvd', lastValueVisible:false, priceLineVisible:false}});
+const cvdL = chart.addLineSeries({{color:'#fff176', lineWidth:1, priceScaleId:'cvd_cum', lastValueVisible:false, priceLineVisible:false}});
 chart.priceScale('cvd').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }} }});
+chart.priceScale('cvd_cum').applyOptions({{ scaleMargins:{{ top:{cvm[0]}, bottom:{cvm[1]} }}, visible:false }});
 cvdH.createPriceLine({{ price:0, color:'#888888', lineWidth:1, lineStyle:0, axisLabelVisible:true, title:'0' }});"""
         cvd_init   = "\ncvdH.setData(init.indicators.CVD || []);\ncvdL.setData(init.indicators.CVD_line || []);"
         cvd_update = "\n    if (d.indicators?.CVD) cvdH.update(d.indicators.CVD);\n    if (d.indicators?.CVD_line) cvdL.update(d.indicators.CVD_line);"

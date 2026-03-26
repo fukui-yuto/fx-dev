@@ -47,7 +47,7 @@ def _load_signal_params() -> dict:
 _SAVE_KEYS = ["layout"] + [
     f"p{i}_{k}"
     for i in range(4)
-    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers", "notify")
+    for k in ("symbol", "timeframe", "n_bars", "indicators", "show_ind", "show_markers", "notify", "cvd_scale")
 ]
 
 # ============================================================
@@ -173,6 +173,7 @@ with st.sidebar:
         _default(f"p{i}_show_ind",     True)
         _default(f"p{i}_show_markers", True)
         _default(f"p{i}_notify",       False)
+        _default(f"p{i}_cvd_scale",    1)
 
         label = f"パネル {i+1}" if panel_count > 1 else "📈 パネル設定"
         with st.expander(label, expanded=(panel_count == 1)):
@@ -208,6 +209,13 @@ with st.sidebar:
                 value=st.session_state[f"p{i}_notify"],
                 key=f"sb_notify_{i}",
                 help="エントリー・エグジットシグナル発生時にトースト通知を表示します")
+            if "累積出来高デルタ (CVD)" in st.session_state[f"p{i}_indicators"]:
+                st.session_state[f"p{i}_cvd_scale"] = st.slider(
+                    "CVD デルタ倍率",
+                    min_value=1, max_value=200,
+                    value=int(st.session_state[f"p{i}_cvd_scale"]),
+                    step=1, key=f"sb_cvd_scale_{i}",
+                    help="デルタバーの高さを調整します。大きくするほどバーが見やすくなります")
 
     st.divider()
     st.markdown("### 📐 トレードツール")
@@ -308,6 +316,7 @@ panel_cfgs = [
         "show_ind":     st.session_state[f"p{i}_show_ind"],
         "show_markers": st.session_state.get(f"p{i}_show_markers", True),
         "notify":       st.session_state.get(f"p{i}_notify", False),
+        "cvd_scale":    int(st.session_state.get(f"p{i}_cvd_scale", 1)),
     }
     for i in range(panel_count)
 ]
@@ -397,7 +406,7 @@ else:
 # ============================================================
 
 @st.fragment(run_every="1s")
-def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True, notify: bool = False) -> None:
+def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indicators: list, show_ind: bool = True, show_markers: bool = True, notify: bool = False, cvd_scale: int = 1) -> None:
     from datetime import datetime, timezone
     from dashboard.chart_utils import JST_OFFSET
     df, source = get_ohlcv_dataframe(symbol, timeframe, count=n_bars)
@@ -408,6 +417,13 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     has_entry = "エントリーシグナル" in eff_ind
     eff_ind_fast = [x for x in eff_ind if x != "エントリーシグナル"]
     ind = calculate(df, eff_ind_fast, JST_OFFSET)
+
+    # CVD デルタバーに倍率を適用
+    if cvd_scale != 1 and "CVD" in ind:
+        ind["CVD"]["data"] = [
+            {**d, "value": round(d["value"] * cvd_scale, 2)}
+            for d in ind["CVD"]["data"]
+        ]
 
     # ---- auto-tuned エントリー・エグジットマーカー＋集計（新バー形成時のみ再計算）----
     autotune_markers: list[dict] = []
@@ -772,7 +788,7 @@ def _maybe_auto_tune(symbol: str, timeframe: str) -> None:
 _maybe_auto_tune(panel_cfgs[0]["symbol"], panel_cfgs[0]["timeframe"])
 
 for i, cfg in enumerate(panel_cfgs):
-    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True), cfg.get("notify", False))
+    panel_fragment(i, cfg["symbol"], cfg["timeframe"], cfg["n_bars"], cfg["indicators"], cfg.get("show_ind", True), cfg.get("show_markers", True), cfg.get("notify", False), cfg.get("cvd_scale", 1))
 
 # ============================================================
 # MTF 整合性パネル（短期トレード特化）
