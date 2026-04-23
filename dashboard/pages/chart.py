@@ -444,7 +444,7 @@ def _render_panel_html(panel_id: int, cfg: dict) -> None:
         # マーカー系を ind から抽出して initial_events に含める（即時表示のため）
         # LightweightCharts は時刻昇順ソートを要求するのでソートしてから渡す
         _marker_keys = ("Session_markers", "Divergence_markers", "Pattern_markers",
-                        "Entry_markers", "CVD_divergence_markers")
+                        "Entry_markers", "CVD_divergence_markers", "WEMOF_markers")
         initial_events: list[dict] = []
         for _mk in _marker_keys:
             if _mk in ind:
@@ -574,6 +574,10 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     if "Entry_markers" in ind:
         entry_markers = ind.pop("Entry_markers").get("data", [])
 
+    wemof_markers: list[dict] = []
+    if "WEMOF_markers" in ind:
+        wemof_markers = ind.pop("WEMOF_markers").get("data", [])
+
     # 経済指標マーカー取得（5分キャッシュ済みなので100ms毎呼び出しも軽量）
     try:
         from dashboard.calendar_utils import get_high_impact_for_symbols
@@ -584,7 +588,7 @@ def panel_fragment(panel_id: int, symbol: str, timeframe: str, n_bars: int, indi
     # auto-tuned マーカーを常に表示（旧エントリーシグナルは選択時のみ追加）
     events = (
         session_markers + divergence_markers + pattern_markers
-        + autotune_markers + entry_markers + econ_events
+        + autotune_markers + entry_markers + wemof_markers + econ_events
     )
 
     # ライブシグナルのSL/TPライン＆リアルタイムマーカーを計算

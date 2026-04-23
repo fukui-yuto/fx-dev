@@ -49,13 +49,14 @@ def _df_to_candles(df: pd.DataFrame) -> list:
     return candles
 
 
-def _scale_margins(has_rsi: bool, has_macd: bool, has_stoch: bool = False, has_cvd: bool = False) -> dict:
+def _scale_margins(has_rsi: bool, has_macd: bool, has_stoch: bool = False, has_cvd: bool = False, has_wemof: bool = False) -> dict:
     """サブインジケーターの有無に応じてscaleMarginsを返す。"""
     subs: list[str] = []
     if has_rsi:   subs.append("rsi")
     if has_stoch: subs.append("stoch")
     if has_macd:  subs.append("macd")
     if has_cvd:   subs.append("cvd")
+    if has_wemof: subs.append("wemof")
 
     n = len(subs)
     if n == 0:
@@ -183,7 +184,8 @@ def build_panel_html(
     has_recent_hl = "Recent_HL"  in indicators_data
     has_zigzag    = "ZigZag_line" in indicators_data
     has_cvd       = "CVD_delta"   in indicators_data
-    margins  = _scale_margins(has_rsi, has_macd, has_stoch, has_cvd)
+    has_wemof     = "WEMOF_pctB"  in indicators_data
+    margins  = _scale_margins(has_rsi, has_macd, has_stoch, has_cvd, has_wemof)
     cm       = margins["candles"]
 
     # ---- overlay indicator JS ----
@@ -318,6 +320,27 @@ function _cvdApplyScale() {{
             "\n        if (cvdRaw.length > 0 && cvdRaw[cvdRaw.length-1].time === _d.time) { cvdRaw[cvdRaw.length-1] = _d; } else { cvdRaw.push(_d); cvdMaxAbs = Math.max(cvdMaxAbs, Math.abs(_d.value)); }"
             "\n        cvdH.update(_d);"
             "\n    }"
+        )
+
+    # ---- WEMOF (%B + Delta %B) JS ----
+    wemof_series = wemof_init = wemof_update = ""
+    if has_wemof:
+        wm = margins.get("wemof", (0.75, 0.0))
+        wemof_series = f"""
+const wemofPctB = chart.addLineSeries({{color:'#e040fb', lineWidth:1, priceScaleId:'wemof', lastValueVisible:false, priceLineVisible:false}});
+const wemofDelta = chart.addHistogramSeries({{priceScaleId:'wemof_d', lastValueVisible:false, base:0}});
+chart.priceScale('wemof').applyOptions({{ scaleMargins:{{ top:{wm[0]}, bottom:{wm[1]} }} }});
+chart.priceScale('wemof_d').applyOptions({{ scaleMargins:{{ top:{wm[0]}, bottom:{wm[1]} }} }});
+wemofPctB.createPriceLine({{ price:1.0, color:'#ff525288', lineWidth:1, lineStyle:2, axisLabelVisible:true, title:'+3\\u03c3' }});
+wemofPctB.createPriceLine({{ price:0.0, color:'#00e67688', lineWidth:1, lineStyle:2, axisLabelVisible:true, title:'-3\\u03c3' }});
+wemofPctB.createPriceLine({{ price:0.5, color:'#55555588', lineWidth:1, lineStyle:2, axisLabelVisible:false }});"""
+        wemof_init = (
+            "\nwemofPctB.setData(init.indicators.WEMOF_pctB || []);"
+            "\nwemofDelta.setData(init.indicators.WEMOF_delta || []);"
+        )
+        wemof_update = (
+            "\n    if (d.indicators?.WEMOF_pctB) wemofPctB.update(d.indicators.WEMOF_pctB);"
+            "\n    if (d.indicators?.WEMOF_delta) wemofDelta.update(d.indicators.WEMOF_delta);"
         )
 
     # ---- 直近高値/安値 JS ----
@@ -461,6 +484,7 @@ chart.priceScale('right').applyOptions({{ scaleMargins:{{ top:{cm[0]}, bottom:{c
 {stoch_series}
 {macd_series}
 {cvd_series}
+{wemof_series}
 {sr_series}
 {recent_hl_series}
 {pivot_series}
@@ -469,7 +493,7 @@ chart.priceScale('right').applyOptions({{ scaleMargins:{{ top:{cm[0]}, bottom:{c
 const init = {initial};
 cSeries.setData(init.candles);
 if (init.events?.length) cSeries.setMarkers(init.events);
-{overlay_init}{zigzag_init}{rsi_init}{stoch_init}{macd_init}{cvd_init}{sr_init}{recent_hl_init}{pivot_init}{signal_lines_init}
+{overlay_init}{zigzag_init}{rsi_init}{stoch_init}{macd_init}{cvd_init}{wemof_init}{sr_init}{recent_hl_init}{pivot_init}{signal_lines_init}
 
 window.addEventListener('resize', () => {{ chart.applyOptions({{ width:window.innerWidth }}); }});
 
@@ -511,7 +535,7 @@ setInterval(async () => {{
     const d = await r.json();
     if (!d.candle) return;
     cSeries.update(d.candle);
-    if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{cvd_update}{sr_update}{recent_hl_update}{pivot_update}{signal_lines_update}
+    if (d.events?.length) cSeries.setMarkers(d.events);{overlay_update}{zigzag_update}{rsi_update}{stoch_update}{macd_update}{cvd_update}{wemof_update}{sr_update}{recent_hl_update}{pivot_update}{signal_lines_update}
     if (d.notification?.ts && d.notification.ts !== _notifLastTs) {{
       _notifLastTs = d.notification.ts;
       playNotifSound(d.notification.type);

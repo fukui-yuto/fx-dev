@@ -40,6 +40,8 @@ STRATEGIES = [
     "トリプル確認(EMA+RSI+MACD)", "ストキャスティクス×EMAトレンド",
     # 夜間スキャルピング専用
     "夜間スカルパー(4重確認)", "夜間ブレイクアウト(BB拡張)", "夜間押し目買い(EMA+RSI+ATR)",
+    # 逆張りスキャルピング
+    "WEMOF(ウェモフ)",
 ]
 
 STRATEGY_PARAMS: dict[str, list[dict]] = {
@@ -194,6 +196,11 @@ STRATEGY_PARAMS: dict[str, list[dict]] = {
         {"key": "overbought",    "label": "RSI 利食いライン",             "min": 50, "max": 80,  "default": 65,   "step": 5},
         {"key": "atr_period",    "label": "ATR期間",                      "min": 3,  "max": 30,  "default": 10,   "step": 1},
         {"key": "atr_multiplier","label": "ATR倍率（ボラ閾値）",          "min": 0.3,"max": 2.0, "default":  0.8, "step": 0.1, "type": "float"},
+    ],
+    "WEMOF(ウェモフ)": [
+        {"key": "bb_period",             "label": "BB期間",                 "min": 5,   "max": 50,  "default": 20,   "step": 1},
+        {"key": "pctb_delta_threshold",  "label": "%B変化率閾値",           "min": 0.05,"max": 0.5, "default": 0.15, "step": 0.01, "type": "float"},
+        {"key": "consecutive_filter",    "label": "連続足フィルター(本数)", "min": 3,   "max": 10,  "default": 5,    "step": 1},
     ],
 }
 

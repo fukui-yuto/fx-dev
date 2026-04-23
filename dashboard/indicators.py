@@ -30,6 +30,7 @@ INDICATOR_OPTIONS = [
     "VWAP",
     "カルマントレンド",
     "CVDダイバージェンス",
+    "WEMOF (ウェモフ)",
 ]
 
 # インジケーターの色
@@ -1252,6 +1253,139 @@ def calc_cvd_divergence(
     return markers
 
 
+# ============================================================
+# WEMOF (Wakkyai's Entry Model Of FX)
+# ============================================================
+
+def calc_wemof_percent_b(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    """
+    ボリンジャーバンド %B を ±3σ 基準で計算する。
+    %B = (価格 - lower_3σ) / (upper_3σ - lower_3σ)
+    0.0 = -3σ, 0.5 = 中央線(SMA), 1.0 = +3σ
+    """
+    mid = df["close"].rolling(period).mean()
+    std = df["close"].rolling(period).std()
+    upper3 = mid + 3 * std
+    lower3 = mid - 3 * std
+    bandwidth = upper3 - lower3
+    percent_b = (df["close"] - lower3) / bandwidth.replace(0, float("nan"))
+    return percent_b
+
+
+def calc_wemof_signals(
+    df: pd.DataFrame, jst_offset: int, period: int = 20,
+    pctb_delta_threshold: float = 0.15, lookback: int = 5,
+) -> tuple[pd.Series, pd.Series, list[dict]]:
+    """
+    WEMOFエントリーシグナルを計算する。
+
+    ロジック:
+    1. 価格が ±3σ にタッチ（%B が 0以下 or 1以上）
+    2. %B の変化率（Delta %B）が異常に大きい
+       → 直近 lookback 期間の %B 変化率の標準偏差の2倍を超えるか、
+         固定閾値 pctb_delta_threshold を超える場合に「異常」と判定
+    3. ピボットポイント（S2/R2）付近ではスキップ（説明可能な動き）
+    4. 急激な一方向移動（連続5本以上の同方向足）はスキップ（トレンドブレイク）
+
+    Returns:
+        (percent_b, delta_pctb, markers)
+    """
+    mid = df["close"].rolling(period).mean()
+    std = df["close"].rolling(period).std()
+    upper3 = mid + 3 * std
+    lower3 = mid - 3 * std
+    bandwidth = upper3 - lower3
+    percent_b = (df["close"] - lower3) / bandwidth.replace(0, float("nan"))
+
+    # %B の変化率
+    delta_pctb = percent_b.diff()
+
+    # Delta %B のローリング標準偏差（異常検出用）
+    delta_std = delta_pctb.rolling(20).std()
+
+    # ピボットポイント計算（フィルター用）
+    pivots = calc_pivot_points(df)
+    pivot_levels = {}
+    for p in pivots:
+        pivot_levels[p["label"]] = p["price"]
+
+    # 連続同方向足カウント
+    direction = (df["close"] - df["open"]).apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    consecutive = pd.Series(0, index=df.index, dtype=int)
+    count = 0
+    prev_dir = 0
+    for i in range(len(direction)):
+        d = direction.iloc[i]
+        if d == prev_dir and d != 0:
+            count += 1
+        else:
+            count = 1
+        consecutive.iloc[i] = count
+        prev_dir = d
+
+    markers: list[dict] = []
+    timestamps = df.index
+
+    for i in range(max(period, lookback + 1), len(df)):
+        pb = percent_b.iloc[i]
+        dpb = delta_pctb.iloc[i]
+        dstd = delta_std.iloc[i]
+        price = float(df["close"].iloc[i])
+
+        if pd.isna(pb) or pd.isna(dpb) or pd.isna(dstd):
+            continue
+
+        # 条件1: ±3σタッチ（%B が 0以下 or 1以上）
+        touch_lower = pb <= 0.0
+        touch_upper = pb >= 1.0
+        if not (touch_lower or touch_upper):
+            continue
+
+        # 条件2: %B 変化率の異常検出
+        # delta_pctb の絶対値が (a) ローリング標準偏差の2倍超 or (b) 固定閾値超
+        abs_dpb = abs(dpb)
+        is_anomaly = abs_dpb > max(dstd * 2, pctb_delta_threshold)
+        if not is_anomaly:
+            continue
+
+        # フィルター1: 連続5本以上の同方向足 → ブレイクアウトの可能性 → スキップ
+        if consecutive.iloc[i] >= 5:
+            continue
+
+        # フィルター2: ピボットS2/R2付近（±spread分）→ 説明可能な動き → スキップ
+        skip_pivot = False
+        pip_unit = 0.01 if "JPY" in str(timestamps[i]) else 0.0001
+        # ピボットレベルは通貨ペアに依存するので、汎用的に0.1%許容
+        for label in ("S2", "S3", "R2", "R3"):
+            if label in pivot_levels:
+                if abs(price - pivot_levels[label]) / price < 0.001:
+                    skip_pivot = True
+                    break
+        if skip_pivot:
+            continue
+
+        # シグナル生成
+        ts_val = int(timestamps[i].timestamp()) + jst_offset
+        if touch_lower:
+            markers.append({
+                "time":     ts_val,
+                "position": "belowBar",
+                "color":    "#00e676",
+                "shape":    "arrowUp",
+                "text":     "W↑",
+            })
+        else:
+            markers.append({
+                "time":     ts_val,
+                "position": "aboveBar",
+                "color":    "#ff5252",
+                "shape":    "arrowDown",
+                "text":     "W↓",
+            })
+
+    return percent_b, delta_pctb, markers
+
+
 def to_line_data(series: pd.Series, timestamps, jst_offset: int, decimals: int = 5) -> list[dict]:
     """Series → [{time, value}, ...] 変換。NaNは除外。"""
     result = []
@@ -1457,6 +1591,52 @@ def calculate(df: pd.DataFrame, selected: list[str], jst_offset: int) -> dict:
             result["CVD_divergence_markers"] = {
                 "type": "cvd_divergence",
                 "data": calc_cvd_divergence(df, jst_offset),
+            }
+
+        elif ind == "WEMOF (ウェモフ)":
+            # BB 7本線は自動で追加（WEMOFの前提）
+            if "BB_mid" not in result:
+                bands = calc_bollinger(df)
+                result["BB_mid"] = {
+                    "type": "overlay", "color": "#9e9e9e", "lineStyle": 2,
+                    "data": to_line_data(bands["mid"], ts, jst_offset),
+                }
+                for sigma, color in [
+                    ("1", "#b39ddb"), ("2", "#7986cb"), ("3", "#3f51b5")
+                ]:
+                    result[f"BB_upper_{sigma}"] = {
+                        "type": "overlay", "color": color, "lineStyle": 0,
+                        "data": to_line_data(bands[f"upper_{sigma}"], ts, jst_offset),
+                    }
+                    result[f"BB_lower_{sigma}"] = {
+                        "type": "overlay", "color": color, "lineStyle": 0,
+                        "data": to_line_data(bands[f"lower_{sigma}"], ts, jst_offset),
+                    }
+
+            # %B ライン (3σ基準)
+            percent_b, delta_pctb, wemof_markers = calc_wemof_signals(df, jst_offset)
+            result["WEMOF_pctB"] = {
+                "type": "sub_wemof_pctb", "color": "#e040fb",
+                "data": to_line_data(percent_b, ts, jst_offset, decimals=4),
+            }
+
+            # Delta %B ヒストグラム
+            result["WEMOF_delta"] = {
+                "type": "sub_wemof_delta",
+                "data": [
+                    {
+                        "time":  int(t.timestamp()) + jst_offset,
+                        "value": round(float(v), 4),
+                        "color": "#00e676" if v >= 0 else "#ff5252",
+                    }
+                    for t, v in zip(ts, delta_pctb) if not pd.isna(v)
+                ],
+            }
+
+            # WEMOFシグナルマーカー
+            result["WEMOF_markers"] = {
+                "type": "wemof",
+                "data": wemof_markers,
             }
 
     return result

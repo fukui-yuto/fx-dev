@@ -678,6 +678,42 @@ def generate_signals(df: pd.DataFrame, params: BacktestParams) -> pd.Series:
         sig = np.where(bull_fvg & ssl_recent, 1,
               np.where(bear_fvg & bsl_recent, -1, 0))
 
+    elif params.strategy == "WEMOF(ウェモフ)":
+        bb_period       = p.get("bb_period", 20)
+        pctb_threshold  = p.get("pctb_delta_threshold", 0.15)
+        consec_filter   = p.get("consecutive_filter", 5)
+
+        mid = _sma(close, bb_period)
+        std = close.rolling(bb_period).std()
+        upper3 = mid + 3 * std
+        lower3 = mid - 3 * std
+        bandwidth = upper3 - lower3
+        pctb = (close - lower3) / bandwidth.replace(0, float("nan"))
+        delta_pctb = pctb.diff()
+        delta_std = delta_pctb.rolling(20).std()
+
+        # ±3σタッチ
+        touch_lower = pctb <= 0.0
+        touch_upper = pctb >= 1.0
+
+        # %B変化率の異常検出
+        abs_dpb = delta_pctb.abs()
+        anomaly = abs_dpb > np.maximum(delta_std * 2, pctb_threshold)
+
+        # 連続同方向足フィルター
+        direction = (close - df["open"]).apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+        consec = pd.Series(0, index=df.index, dtype=int)
+        cnt, prev = 0, 0
+        for idx in range(len(direction)):
+            d = direction.iloc[idx]
+            cnt = cnt + 1 if d == prev and d != 0 else 1
+            consec.iloc[idx] = cnt
+            prev = d
+        no_breakout = consec < consec_filter
+
+        sig = np.where(touch_lower & anomaly & no_breakout, 1,
+              np.where(touch_upper & anomaly & no_breakout, -1, 0))
+
     sig = pd.Series(sig, index=df.index, dtype=int)
 
     # 方向フィルター
@@ -704,7 +740,7 @@ def generate_signals(df: pd.DataFrame, params: BacktestParams) -> pd.Series:
             "トリプル確認(EMA+RSI+MACD)", "夜間スカルパー(4重確認)",
             "ロンドンブレイクアウト", "ICT_FVGスキャルパー",
         }
-        _MR_STRATS = {"RSI×BB", "夜間スカルパー(4重確認)"}
+        _MR_STRATS = {"RSI×BB", "夜間スカルパー(4重確認)", "WEMOF(ウェモフ)"}
         hurst = _hurst(close)
         if params.strategy in _TREND_STRATS - _MR_STRATS:
             sig = sig.where(hurst >= 0.45, 0)
